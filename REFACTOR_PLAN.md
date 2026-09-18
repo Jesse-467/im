@@ -121,6 +121,22 @@ ACCOUNT_RPC_ENDPOINT   # Chat 依赖 Account 的地址
 
 > 下文 §2.1 / §2.3 中的应用边界图与目录树、§6 Phase 0 的备份动作、§12 的决策点表，凡与本节冲突者，**一律以本节为准**。
 
+### v1.2 —— 模块引用方式与编排修正（**优先级高于 v1.1 及下文所有冲突内容**）
+
+1. **不再使用 `go.work`**。工作区会把多个 module 隐式耦合在一起，掩盖真实依赖，也无法验证 module 是否真的可独立构建与发布。`go.work` / `go.work.sum` 已加入 `.gitignore`。
+2. **跨 module 引用统一走仓库依赖**，流程固定为：
+   `git commit` → `git push` → `go get github.com/Jesse-467/im/pkg@<commit-sha>`（解析为伪版本）→ 写入 `go.mod`。
+   代价是每次修改 `pkg` 契约都需要一次推送；收益是依赖关系真实、版本可追溯，且两个应用确实能独立构建。
+3. **module 路径与仓库对齐**（仓库为 `github.com/Jesse-467/im`，公开仓库，`go get` 可直接解析）：
+   - `github.com/Jesse-467/im/pkg`（目录 `pkg/`）
+   - `github.com/Jesse-467/im/Account`（目录 `Account/`）
+   - `github.com/Jesse-467/im/Chat`（目录 `Chat/`）
+   所有 `proto` 的 `go_package` 已同步为该形式的完整路径。
+4. **修正 v1.0 的 Phase 2 定义**：原计划在 `pkg` 内建 `xgin / xkafka / xws` 等基建库，这与 v1.1「pkg 只放协议」冲突。**Phase 2 作废**，相关基建代码分别在 `Account/internal` 与 `Chat/internal` 内各自实现，两边不共享。后续阶段编号顺延。
+5. **本地编排改用非默认端口**，避免与开发机上已有的 MySQL / Redis 冲突：
+   MySQL `13306`、Redis `16379`、Kafka `19092`、etcd `12379`。`.env.example` 已对齐。
+6. **基线分支**：`rebuild/kratos-gin`（已推送至 origin）。
+
 ---
 
 ## 0. 一句话目标
@@ -597,7 +613,8 @@ CREATE TABLE `message_outbox` (
   - `/readyz` 对 MySQL 与 Redis 的真实探测均返回 `ok`。
 - **顺延项**：Jaeger 链路与 Prometheus 指标已预留配置项，实际接入放在 Phase 7；Chat 的 gRPC 服务端与业务层放在 Phase 4~6。
 
-### Phase 2：pkg 基建库
+### Phase 2：pkg 基建库　❌ 已作废
+> 与 v1.1「`pkg` 只放协议」冲突，见 v1.2 第 4 条。公共基建改为在 `Account/internal` 与 `Chat/internal` 内各自实现，两边不共享。后续阶段编号顺延。
 - **产出**：`xerr / xgin / xauth / xredis / xkafka / xws / xid / xtrace / xlog / xtest`。
 - **验收**：单测覆盖率 ≥ 80%；`xkafka` 有故障注入测试（broker 不可用时行为可预期）。
 
