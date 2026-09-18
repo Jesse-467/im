@@ -4,6 +4,7 @@
 
 SHELL   := /bin/sh
 GO      ?= go
+WIRE    ?= wire
 MODULES := pkg Account Chat
 
 .PHONY: help
@@ -11,6 +12,7 @@ help:
 	@echo "IM Message · 可用命令："
 	@echo "  make tidy         整理所有 module 依赖"
 	@echo "  make proto        由 .proto 生成 pb.go（pkg 模块）"
+	@echo "  make wire         重新生成 Wire 依赖注入代码并格式化"
 	@echo "  make build        构建 account 与 chat 二进制到 bin/"
 	@echo "  make lint         静态检查（go vet）"
 	@echo "  make test         运行全部测试"
@@ -30,6 +32,14 @@ tidy:
 .PHONY: proto
 proto:
 	@$(MAKE) -C pkg proto
+
+.PHONY: wire
+wire:
+	@echo ">> wire (Account)"
+	@cd Account && $(WIRE) ./cmd/account
+	@echo ">> wire (Chat)"
+	@cd Chat && $(WIRE) ./cmd/chat
+	@$(MAKE) fmt
 
 .PHONY: fmt
 fmt:

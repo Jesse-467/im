@@ -7,11 +7,11 @@
 package main
 
 import (
-	"github.com/go-kratos/kratos/v2"
-	"github.com/go-kratos/kratos/v2/log"
 	"github.com/Jesse-467/im/Chat/internal/conf"
 	"github.com/Jesse-467/im/Chat/internal/data"
 	"github.com/Jesse-467/im/Chat/internal/server"
+	"github.com/go-kratos/kratos/v2"
+	"github.com/go-kratos/kratos/v2/log"
 	"time"
 )
 
