@@ -1,2 +1,2 @@
 -- 回滚：删除账号表
-DROP TABLE IF EXISTS `user`;
+DROP TABLE IF EXISTS account_user;

@@ -1,6 +1,6 @@
 // Package data 实现 biz 层声明的仓储接口，并持有全部基础设施客户端。
 //
-// 本层是唯一感知具体中间件（MySQL / Redis / 云组件）的地方。业务层只看到接口，
+// 本层是唯一感知具体中间件（PostgreSQL / Redis / 云组件）的地方。业务层只看到接口，
 // 因此更换存储实现不会影响业务规则。
 package data
 
@@ -10,7 +10,7 @@ import (
 
 	klog "github.com/go-kratos/kratos/v2/log"
 	"github.com/redis/go-redis/v9"
-	gormmysql "gorm.io/driver/mysql"
+	gormpg "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
@@ -59,21 +59,18 @@ func NewData(c *conf.Config, logger klog.Logger) (*Data, func(), error) {
 
 // newDB 按 DB_TYPE 构建数据库连接。
 //
-// 当前 mysql / polardb / rds 均兼容 MySQL 协议，共用同一驱动；
-// 保留类型分支是为了后续按类型注入不同的连接参数（如云数据库的 SSL、代理地址）。
+// postgres / polardb-pg / rds-pg 均兼容 PostgreSQL 协议，共用 pgx 驱动；
+// 保留类型分支是为了后续按类型注入不同的连接参数（如云数据库要求的 SSL 模式）。
 func newDB(c *conf.Config) (*gorm.DB, error) {
 	level := gormlogger.Warn
 	if c.IsDev() {
 		level = gormlogger.Info
 	}
 
-	db, err := gorm.Open(gormmysql.New(gormmysql.Config{
-		DSN: c.DB.EffectiveDSN(),
-		// 关闭初始化时的版本探测，使 gorm.Open 不建立真实连接。
-		// 否则进程会在依赖不可用时直接崩溃，与「进程先行启动、由 /readyz 反映依赖状态」
-		// 的设计目标相冲突。本服务未使用依赖版本差异的特性，关闭探测无副作用。
-		SkipInitializeWithVersion: true,
-	}), &gorm.Config{
+	db, err := gorm.Open(gormpg.Open(c.DB.EffectiveDSN()), &gorm.Config{
+		// 关键：不在启动时建立真实连接，使进程可以先于数据库启动，
+		// 由 /readyz 如实反映依赖状态，避免容器编排下「依赖未起 → 进程退出 → 重启风暴」。
+		// pgx 的 sql.Open 本身是惰性的，配合该开关即可实现完全惰性初始化。
 		DisableAutomaticPing:   true,
 		SkipDefaultTransaction: true, // 单条写入无需隐式事务；跨表一致性由业务显式控制
 		Logger:                 gormlogger.Default.LogMode(level),

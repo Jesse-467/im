@@ -121,6 +121,16 @@ ACCOUNT_RPC_ENDPOINT   # Chat 依赖 Account 的地址
 
 > 下文 §2.1 / §2.3 中的应用边界图与目录树、§6 Phase 0 的备份动作、§12 的决策点表，凡与本节冲突者，**一律以本节为准**。
 
+### v1.3 —— 数据库由 MySQL 切换为 PostgreSQL（**优先级最高**）
+
+1. **数据库选型改为 PostgreSQL 17**，`DB_TYPE` 取值 `postgres`（本地）| `polardb-pg` | `rds-pg`。云端产品同样兼容 PG 协议，只改地址与 SSL 要求即可，业务代码零改动。
+2. **驱动换为 `gorm.io/driver/postgres`（pgx）**，移除 `go-sql-driver/mysql` 与 `gorm.io/driver/mysql`。DSN 采用 PostgreSQL 的**关键字/值形式**（`host=... port=... user=...`）而非 URL 形式——口令中常含 `@ : /`，URL 形式需要转义。
+3. **表名 `user` → `account_user`**：`user` 是 PostgreSQL 保留字（等价于 `current_user`），不加引号会直接报语法错误。
+4. **唯一约束冲突的判定改用 SQLSTATE `23505`**（原为 MySQL 的 1062），并直接比对字面量而不引入官方错误码常量包。
+5. **时间类型统一为 `TIMESTAMPTZ`**。注意 PostgreSQL 没有 MySQL 的 `ON UPDATE CURRENT_TIMESTAMP`，`updated_at` 改由应用侧（GORM 的 `autoUpdateTime`）维护。
+6. **本地编排的 MySQL 容器换成 `postgres:17-alpine`**，映射端口 `15432`（避开宿主机 5432，便于与本机原生实例共存），数据存放在命名卷 `postgres_data`，建库脚本挂在 `deploy/init/postgres/`。
+7. **本机同时提供原生 PostgreSQL 17.2（免安装二进制）**，位于 `D:\pgsql`，数据目录 `im/.localdb/pgdata`（已 gitignore）。两者任选其一，`.env.example` 默认指向原生实例的 `5432`。
+
 ### v1.2 —— 模块引用方式与编排修正（**优先级高于 v1.1 及下文所有冲突内容**）
 
 1. **不再使用 `go.work`**。工作区会把多个 module 隐式耦合在一起，掩盖真实依赖，也无法验证 module 是否真的可独立构建与发布。`go.work` / `go.work.sum` 已加入 `.gitignore`。

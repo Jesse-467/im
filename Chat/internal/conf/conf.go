@@ -46,8 +46,9 @@ type Config struct {
 
 // DB 关系型数据库配置。
 //
-// Type 取值：mysql（本地）| polardb | rds。
-// 当前三种 Type 共用 MySQL 协议，保留字段是为了后续按类型注入不同的连接参数与降级策略。
+// Type 取值：postgres（本地）| polardb-pg | rds-pg。
+// 云端产品均兼容 PostgreSQL 协议，因此三者共用同一驱动与 DSN 形式，
+// 差异只体现在地址、SSL 要求与连接参数上。
 type DB struct {
 	Type            string
 	Host            string
@@ -55,20 +56,24 @@ type DB struct {
 	User            string
 	Password        string
 	Name            string
+	SSLMode         string
 	DSN             string // 显式指定时优先级最高
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
 }
 
-// EffectiveDSN 返回最终使用的 DSN：显式配置优先，否则按分项拼接。
+// EffectiveDSN 返回最终使用的 DSN。
+//
+// 采用 PostgreSQL 的关键字/值形式而非 URL 形式：口令中常含 @ : / 等字符，
+// URL 形式需要转义，关键字形式则天然安全。
 func (d DB) EffectiveDSN() string {
 	if d.DSN != "" {
 		return d.DSN
 	}
 	return fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=Local&timeout=5s&readTimeout=10s&writeTimeout=10s",
-		d.User, d.Password, d.Host, d.Port, d.Name,
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s TimeZone=Asia/Shanghai connect_timeout=5",
+		d.Host, d.Port, d.User, d.Password, d.Name, d.SSLMode,
 	)
 }
 
@@ -169,12 +174,13 @@ func Load() (*Config, error) {
 		ServiceName: envString("ServiceName", "chat"),
 
 		DB: DB{
-			Type:            envString("DB_TYPE", "mysql"),
+			Type:            envString("DB_TYPE", "postgres"),
 			Host:            envString("DB_HOST", "127.0.0.1"),
-			Port:            envInt("DB_PORT", 3306),
-			User:            envString("DB_USER", "root"),
+			Port:            envInt("DB_PORT", 5432),
+			User:            envString("DB_USER", "postgres"),
 			Password:        envString("DB_PASSWORD", ""),
 			Name:            envString("DB_NAME", "im_chat"),
+			SSLMode:         envString("DB_SSL_MODE", "disable"),
 			DSN:             envString("DB_DSN", ""),
 			MaxOpenConns:    envInt("DB_MAX_OPEN_CONNS", 100),
 			MaxIdleConns:    envInt("DB_MAX_IDLE_CONNS", 20),

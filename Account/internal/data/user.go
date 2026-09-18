@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/Jesse-467/im/Account/internal/biz"
@@ -15,7 +15,13 @@ import (
 // 编译期断言：仓储实现必须满足业务层声明的接口。
 var _ biz.UserRepo = (*userRepo)(nil)
 
-// userModel 是 user 表的 ORM 映射。
+// pgUniqueViolation 是 PostgreSQL 唯一约束冲突的 SQLSTATE 错误码。
+const pgUniqueViolation = "23505"
+
+// userModel 是 account_user 表的 ORM 映射。
+//
+// 表名刻意加 account_ 前缀：user 是 PostgreSQL 的保留字（等价于 current_user 函数），
+// 直接作为表名会在不加引号的 SQL 中报语法错误，加上前缀也顺带明确了归属。
 //
 // 字段与表结构一一对应；业务实体由 biz.User 表达，两者刻意分离，
 // 避免表结构变化直接冲击业务层。
@@ -31,7 +37,7 @@ type userModel struct {
 }
 
 // TableName 指定表名。
-func (userModel) TableName() string { return "user" }
+func (userModel) TableName() string { return "account_user" }
 
 // userRepo 是 biz.UserRepo 的 GORM 实现。
 type userRepo struct{ data *Data }
@@ -119,10 +125,13 @@ func normalize(err error, action string) error {
 	return fmt.Errorf("data: %s失败: %w", action, err)
 }
 
-// isDuplicateKey 判断是否为 MySQL 唯一键冲突（错误码 1062）。
+// isDuplicateKey 判断是否为唯一约束冲突。
+//
+// 这里直接比对 PostgreSQL 的 SQLSTATE 码，而未引入官方错误码常量包：
+// 该码由 SQL 标准固定，几乎不会变化，少一个依赖更利于长期维护。
 func isDuplicateKey(err error) bool {
-	var myErr *mysql.MySQLError
-	return errors.As(err, &myErr) && myErr.Number == 1062
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
 }
 
 // toBiz 把存储模型转换为业务实体。

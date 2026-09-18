@@ -20,6 +20,9 @@ help:
 	@echo "  make dev-up       启动本地中间件（docker compose）"
 	@echo "  make dev-down     停止本地中间件"
 	@echo "  make dev-logs     查看中间件日志"
+	@echo "  make pg-start     启动本机原生 PostgreSQL"
+	@echo "  make pg-stop      停止本机原生 PostgreSQL"
+	@echo "  make pg-status    查看本机原生 PostgreSQL 状态"
 	@echo "  make run-account  本地运行 account"
 	@echo "  make run-chat     本地运行 chat"
 
@@ -77,6 +80,26 @@ dev-down:
 .PHONY: dev-logs
 dev-logs:
 	@docker compose -f deploy/docker-compose.local.yaml logs -f
+
+# ── 本机原生 PostgreSQL（可选，与上面的容器实例二选一） ──────────────────────
+# 路径可用 make PG_HOME=... 覆盖；仓库默认不放机器相关配置，这里只是方便的默认值。
+
+PG_HOME ?= D:/pgsql/pgsql
+PG_DATA ?= $(CURDIR)/.localdb/pgdata
+PG_LOG  ?= $(CURDIR)/.localdb/pg.log
+PG_PORT ?= 5432
+
+.PHONY: pg-start
+pg-start:
+	@$(PG_HOME)/bin/pg_ctl.exe -D "$(PG_DATA)" -l "$(PG_LOG)" -o "-p $(PG_PORT)" start
+
+.PHONY: pg-stop
+pg-stop:
+	@$(PG_HOME)/bin/pg_ctl.exe -D "$(PG_DATA)" -m fast stop
+
+.PHONY: pg-status
+pg-status:
+	@$(PG_HOME)/bin/pg_ctl.exe -D "$(PG_DATA)" status
 
 # ── 本地运行 ────────────────────────────────────────────────────────────────
 

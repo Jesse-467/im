@@ -8,21 +8,21 @@ import (
 
 // 编译期断言：两个探测器都必须满足健康检查契约。
 var (
-	_ health.Checker = (*MySQLChecker)(nil)
+	_ health.Checker = (*PostgresChecker)(nil)
 	_ health.Checker = (*RedisChecker)(nil)
 )
 
-// MySQLChecker 探测数据库可用性。
-type MySQLChecker struct{ data *Data }
+// PostgresChecker 探测数据库可用性。
+type PostgresChecker struct{ data *Data }
 
-// NewMySQLChecker 构造数据库探测器。
-func NewMySQLChecker(d *Data) *MySQLChecker { return &MySQLChecker{data: d} }
+// NewPostgresChecker 构造数据库探测器。
+func NewPostgresChecker(d *Data) *PostgresChecker { return &PostgresChecker{data: d} }
 
 // Name 返回依赖名称。
-func (c *MySQLChecker) Name() string { return "mysql" }
+func (c *PostgresChecker) Name() string { return "postgres" }
 
 // Check 通过连接池 Ping 判断数据库是否可用。
-func (c *MySQLChecker) Check(ctx context.Context) error {
+func (c *PostgresChecker) Check(ctx context.Context) error {
 	sqlDB, err := c.data.db.DB()
 	if err != nil {
 		return err

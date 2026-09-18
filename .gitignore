@@ -16,6 +16,8 @@
 # ── 本地中间件数据卷 ──
 /data/
 /deploy/data/
+# 本地原生 PostgreSQL 实例的数据目录（不入库）
+/.localdb/
 
 # ── 测试与覆盖率 ──
 *.test

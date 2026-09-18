@@ -29,9 +29,9 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	mySQLChecker := data.NewMySQLChecker(dataData)
+	postgresChecker := data.NewPostgresChecker(dataData)
 	redisChecker := data.NewRedisChecker(dataData)
-	v := data.NewHealthCheckers(mySQLChecker, redisChecker)
+	v := data.NewHealthCheckers(postgresChecker, redisChecker)
 	httpServer := server.NewHTTPServer(cfg, logger, v)
 	app := newApp(cfg, logger, httpServer)
 	return app, func() {

@@ -5,35 +5,38 @@
 # 用法：make dev-up   /   docker compose -f deploy/docker-compose.local.yaml up -d
 #
 # 设计说明：
-#   1. 端口刻意使用非默认值（MySQL 13306 / Redis 16379 / Kafka 19092），
-#      避免与开发者机器上已有的本地服务冲突；对应地址已写入 .env.example。
+#   1. 端口刻意避开常用默认值（PostgreSQL 15432 / Redis 16379 / Kafka 19092 /
+#      etcd 12379），便于与开发机上已有的本地服务共存。
 #   2. Kafka 使用 KRaft 模式（不依赖 ZooKeeper），并通过 kafka-init 一次性
 #      创建 topic —— 生产环境禁止自动建 topic，本地保持一致以免掩盖问题。
 #   3. 所有服务都配置了 healthcheck，保证 `up -d` 后依赖是可用的而非仅仅启动了。
+#   4. 数据持久化：PostgreSQL 用命名卷 postgres_data，Redis 用 redis_data，
+#      容器重建不会丢数据；需要彻底重置时执行 `docker compose down -v`。
 # ============================================================================
 
 name: im-local
 
 services:
-  mysql:
-    image: mysql:8.0.39
-    container_name: im-mysql
+  postgres:
+    image: postgres:17-alpine
+    container_name: im-postgres
     environment:
       TZ: Asia/Shanghai
-      MYSQL_ROOT_PASSWORD: im_local_pass
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: im_local_pass
+      # 默认库；im_account / im_chat 由挂载的初始化脚本创建
+      POSTGRES_DB: postgres
+      # 与 initdb 时的 locale 对齐，保证容器内与本地实例行为一致
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
-      - "13306:3306"
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_0900_ai_ci
-      - --default-authentication-plugin=mysql_native_password
-      - --explicit_defaults_for_timestamp=true
+      # 刻意避开宿主机 5432，便于同时保留本机原生 PostgreSQL
+      - "15432:5432"
     volumes:
-      - mysql_data:/var/lib/mysql
-      # 首次启动时自动创建 im_account / im_chat 两个库
-      - ./init/mysql:/docker-entrypoint-initdb.d:ro
+      - postgres_data:/var/lib/postgresql/data
+      # 仅在数据卷为空时执行一次，用于创建 im_account / im_chat 两个库
+      - ./init/postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pim_local_pass"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -143,7 +146,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  mysql_data:
+  postgres_data:
   redis_data:
   kafka_data:
   etcd_data:
