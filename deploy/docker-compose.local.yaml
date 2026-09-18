@@ -1,0 +1,149 @@
+# ============================================================================
+# 本地开发中间件编排
+#
+# 用途：为本地开发/联调提供一套可复现的依赖环境。
+# 用法：make dev-up   /   docker compose -f deploy/docker-compose.local.yaml up -d
+#
+# 设计说明：
+#   1. 端口刻意使用非默认值（MySQL 13306 / Redis 16379 / Kafka 19092），
+#      避免与开发者机器上已有的本地服务冲突；对应地址已写入 .env.example。
+#   2. Kafka 使用 KRaft 模式（不依赖 ZooKeeper），并通过 kafka-init 一次性
+#      创建 topic —— 生产环境禁止自动建 topic，本地保持一致以免掩盖问题。
+#   3. 所有服务都配置了 healthcheck，保证 `up -d` 后依赖是可用的而非仅仅启动了。
+# ============================================================================
+
+name: im-local
+
+services:
+  mysql:
+    image: mysql:8.0.39
+    container_name: im-mysql
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: im_local_pass
+    ports:
+      - "13306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --explicit_defaults_for_timestamp=true
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 首次启动时自动创建 im_account / im_chat 两个库
+      - ./init/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pim_local_pass"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: im-redis
+    command:
+      - redis-server
+      - --requirepass
+      - im_local_pass
+      - --appendonly
+      - "yes"
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "im_local_pass", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: im-kafka
+    environment:
+      TZ: Asia/Shanghai
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: "controller,broker"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      # INTERNAL 供容器内互访，EXTERNAL 供宿主机上的应用访问
+      KAFKA_CFG_LISTENERS: "INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://127.0.0.1:19092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      # 与生产保持一致：禁止自动建 topic，由 kafka-init 显式创建
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_CFG_NUM_PARTITIONS: "6"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "19092:19092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+
+  kafka-init:
+    image: bitnami/kafka:3.7
+    container_name: im-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "创建 topic: im.message（6 分区，保证同会话消息落在同一分区以实现有序）"
+        kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists \
+          --topic im.message \
+          --partitions 6 \
+          --replication-factor 1
+        kafka-topics.sh --bootstrap-server kafka:9092 --list
+    restart: "no"
+
+  etcd:
+    image: bitnami/etcd:3.5
+    container_name: im-etcd
+    environment:
+      TZ: Asia/Shanghai
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://etcd:2379"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+    ports:
+      - "12379:2379"
+    volumes:
+      - etcd_data:/bitnami/etcd
+    healthcheck:
+      test: ["CMD-SHELL", "etcdctl endpoint health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: im-jaeger
+    environment:
+      TZ: Asia/Shanghai
+      # 开启 OTLP 接收，供应用通过 4317 上报链路
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+  kafka_data:
+  etcd_data:

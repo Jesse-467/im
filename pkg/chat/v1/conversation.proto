@@ -1,0 +1,107 @@
+// 会话领域契约：单聊与群聊统一建模。
+//
+// 单聊由系统按 (min_uid, max_uid) 唯一确定；群聊由雪花 ID 标识。
+// 会话是消息的容器，成员关系承载未读位点与备注名。
+syntax = "proto3";
+
+package chat.v1;
+
+option go_package = "github.com/Jesse-467/im/pkg/chat/v1;chatv1";
+
+import "chat/v1/message.proto";
+
+// 会话类型
+enum ConversationType {
+  CONVERSATION_TYPE_UNSPECIFIED = 0;
+  CONVERSATION_TYPE_SINGLE = 1;
+  CONVERSATION_TYPE_GROUP = 2;
+}
+
+// 会话状态
+enum ConversationStatus {
+  CONVERSATION_STATUS_UNSPECIFIED = 0;
+  CONVERSATION_STATUS_NORMAL = 1;
+  // 单聊中对方尚未同意好友申请
+  CONVERSATION_STATUS_PENDING = 2;
+  CONVERSATION_STATUS_BLOCKED = 3;
+}
+
+// 成员角色
+enum MemberRole {
+  MEMBER_ROLE_MEMBER = 0;
+  MEMBER_ROLE_ADMIN = 1;
+  MEMBER_ROLE_OWNER = 2;
+}
+
+// 用户简要信息，由 Chat 侧向 Account 拉取后填充，避免跨协议包耦合
+message UserBrief {
+  int64 user_id = 1;
+  string nickname = 2;
+  string avatar_url = 3;
+}
+
+message Conversation {
+  int64 id = 1;
+  ConversationType type = 2;
+  string name = 3;
+  string avatar_url = 4;
+  ConversationStatus status = 5;
+  int64 owner_id = 6;
+  int64 max_seq = 7;
+  int64 created_at = 8; // Unix 毫秒
+}
+
+message ConversationMember {
+  int64 conversation_id = 1;
+  int64 user_id = 2;
+  // 用户对该会话的自定义备注名
+  string alias_name = 3;
+  MemberRole role = 4;
+  int64 last_read_seq = 5;
+  int64 joined_at = 6; // Unix 毫秒
+}
+
+// 会话列表项，供消息页展示
+message ConversationItem {
+  Conversation conversation = 1;
+  // 单聊为对方昵称（优先备注名），群聊为群名
+  string display_name = 2;
+  string display_avatar = 3;
+  Message last_message = 4;
+  int32 unread_count = 5;
+  int64 last_read_seq = 6;
+}
+
+message ListConversationsRequest {
+  int64 user_id = 1;
+}
+
+message ListConversationsResponse {
+  repeated ConversationItem items = 1;
+}
+
+message GetConversationRequest {
+  int64 conversation_id = 1;
+  int64 viewer_id = 2;
+}
+
+message GetConversationResponse {
+  Conversation conversation = 1;
+  repeated ConversationMember members = 2;
+}
+
+message MarkReadRequest {
+  int64 conversation_id = 1;
+  int64 user_id = 2;
+  int64 seq = 3;
+}
+
+message MarkReadResponse {
+  bool success = 1;
+}
+
+service ConversationService {
+  rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
+  rpc GetConversation(GetConversationRequest) returns (GetConversationResponse);
+  rpc MarkRead(MarkReadRequest) returns (MarkReadResponse);
+}

@@ -1,0 +1,108 @@
+// 好友领域契约：申请、处理、关系维护。
+//
+// 好友关系独立于会话：申请通过后才会创建单聊会话。
+syntax = "proto3";
+
+package chat.v1;
+
+option go_package = "github.com/Jesse-467/im/pkg/chat/v1;chatv1";
+
+import "chat/v1/conversation.proto";
+
+// 好友申请状态
+enum FriendRequestStatus {
+  FRIEND_REQUEST_STATUS_UNSPECIFIED = 0;
+  FRIEND_REQUEST_STATUS_PENDING = 1;
+  FRIEND_REQUEST_STATUS_ACCEPTED = 2;
+  FRIEND_REQUEST_STATUS_REJECTED = 3;
+  FRIEND_REQUEST_STATUS_EXPIRED = 4;
+}
+
+message FriendRequest {
+  int64 id = 1;
+  int64 from_uid = 2;
+  int64 to_uid = 3;
+  string apply_msg = 4;
+  FriendRequestStatus status = 5;
+  int64 created_at = 6; // Unix 毫秒
+  int64 handled_at = 7; // Unix 毫秒，0 表示未处理
+}
+
+message ApplyFriendRequest {
+  int64 from_uid = 1;
+  int64 to_uid = 2;
+  string apply_msg = 3;
+}
+
+message ApplyFriendResponse {
+  int64 request_id = 1;
+  // 双方已是好友时为 true，此时不产生新申请
+  bool already_friends = 2;
+}
+
+message HandleFriendRequest {
+  int64 request_id = 1;
+  // 处理人必须是申请的 to_uid
+  int64 operator_id = 2;
+  bool agree = 3;
+}
+
+message HandleFriendResponse {
+  bool success = 1;
+  // 同意时返回创建/激活的单聊会话 ID
+  int64 conversation_id = 2;
+}
+
+message ListFriendRequestsRequest {
+  int64 user_id = 1;
+  // 0 表示全部
+  FriendRequestStatus status = 2;
+  int32 limit = 3;
+}
+
+message ListFriendRequestsResponse {
+  repeated FriendRequest requests = 1;
+}
+
+message FriendDetail {
+  int64 user_id = 1;
+  string remark = 2;
+  UserBrief brief = 3;
+}
+
+message ListFriendsRequest {
+  int64 user_id = 1;
+  bool with_profile = 2;
+}
+
+message ListFriendsResponse {
+  repeated FriendDetail friends = 1;
+}
+
+message DeleteFriendRequest {
+  int64 user_id = 1;
+  int64 friend_id = 2;
+}
+
+message DeleteFriendResponse {
+  bool success = 1;
+}
+
+message BlockUserRequest {
+  int64 user_id = 1;
+  int64 target_id = 2;
+  bool blocked = 3;
+}
+
+message BlockUserResponse {
+  bool success = 1;
+}
+
+service FriendService {
+  rpc ApplyFriend(ApplyFriendRequest) returns (ApplyFriendResponse);
+  rpc HandleFriend(HandleFriendRequest) returns (HandleFriendResponse);
+  rpc ListFriendRequests(ListFriendRequestsRequest) returns (ListFriendRequestsResponse);
+  rpc ListFriends(ListFriendsRequest) returns (ListFriendsResponse);
+  rpc DeleteFriend(DeleteFriendRequest) returns (DeleteFriendResponse);
+  rpc BlockUser(BlockUserRequest) returns (BlockUserResponse);
+}

@@ -1,0 +1,77 @@
+// 消息领域契约：发送、拉取、同步。
+//
+// 顺序性权威：会话内单调递增的 seq（而非全局自增主键）。
+// 幂等权威：client_msg_id，同会话同发送者下唯一。
+syntax = "proto3";
+
+package chat.v1;
+
+option go_package = "github.com/Jesse-467/im/pkg/chat/v1;chatv1";
+
+// 消息类型
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  MESSAGE_TYPE_TEXT = 1;
+  MESSAGE_TYPE_IMAGE = 2;
+  MESSAGE_TYPE_VIDEO = 3;
+  MESSAGE_TYPE_AUDIO = 4;
+  // 系统消息：入群提示、好友通过、群公告等
+  MESSAGE_TYPE_SYSTEM = 5;
+}
+
+// 消息状态
+enum MessageStatus {
+  MESSAGE_STATUS_UNSPECIFIED = 0;
+  MESSAGE_STATUS_NORMAL = 1;
+  MESSAGE_STATUS_RECALLED = 2;
+  MESSAGE_STATUS_DELETED = 3;
+}
+
+// 消息实体
+message Message {
+  int64 id = 1;               // 雪花 ID，全局唯一
+  int64 conversation_id = 2;
+  int64 seq = 3;              // 会话内序号，顺序权威
+  int64 sender_id = 4;
+  MessageType type = 5;
+  string content = 6;
+  string extra = 7;           // JSON 字符串，承载富媒体等扩展信息
+  string client_msg_id = 8;   // 客户端幂等键
+  MessageStatus status = 9;
+  int64 created_at = 10;      // Unix 毫秒
+}
+
+message SendMessageRequest {
+  int64 conversation_id = 1;
+  int64 sender_id = 2;
+  MessageType type = 3;
+  string content = 4;
+  string extra = 5;
+  // 为空时由服务端生成；重试时必须携带同一值以保证幂等
+  string client_msg_id = 6;
+}
+
+message SendMessageResponse {
+  Message message = 1;
+  // true 表示命中幂等键，返回的是已存在的消息
+  bool duplicated = 2;
+}
+
+message PullMessagesRequest {
+  int64 conversation_id = 1;
+  int64 from_seq = 2;   // 开区间下界，不含
+  int64 to_seq = 3;     // 闭区间上界，0 表示不限制
+  int32 limit = 4;      // 默认 20，上限 200
+  bool ascending = 5;   // true 按 seq 升序（离线同步），false 降序（历史翻页）
+}
+
+message PullMessagesResponse {
+  repeated Message messages = 1;
+  bool has_more = 2;
+  int64 max_seq = 3;    // 本会话当前最大 seq，供客户端对齐
+}
+
+service MessageService {
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc PullMessages(PullMessagesRequest) returns (PullMessagesResponse);
+}

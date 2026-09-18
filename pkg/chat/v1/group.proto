@@ -1,0 +1,88 @@
+// 群组领域契约：建群、成员管理、群资料。
+syntax = "proto3";
+
+package chat.v1;
+
+option go_package = "github.com/Jesse-467/im/pkg/chat/v1;chatv1";
+
+import "chat/v1/conversation.proto";
+
+message CreateGroupRequest {
+  int64 owner_id = 1;
+  string name = 2;
+  // 初始成员，由业务侧校验必须与 owner 互为好友，非好友会被静默忽略
+  repeated int64 member_ids = 3;
+}
+
+message CreateGroupResponse {
+  Conversation conversation = 1;
+  // 实际成功加入的成员数（不含 owner）
+  int32 added_count = 2;
+}
+
+message AddGroupMembersRequest {
+  int64 conversation_id = 1;
+  int64 operator_id = 2;
+  repeated int64 user_ids = 3;
+}
+
+message AddGroupMembersResponse {
+  // 实际新增的成员数，已存在或被过滤的不计入
+  int32 added_count = 1;
+}
+
+message RemoveGroupMemberRequest {
+  int64 conversation_id = 1;
+  int64 operator_id = 2;
+  int64 user_id = 3;
+}
+
+message RemoveGroupMemberResponse {
+  bool success = 1;
+}
+
+message QuitGroupRequest {
+  int64 conversation_id = 1;
+  int64 user_id = 2;
+}
+
+message QuitGroupResponse {
+  bool success = 1;
+}
+
+message UpdateGroupInfoRequest {
+  int64 conversation_id = 1;
+  int64 operator_id = 2;
+  string name = 3;
+  string avatar_url = 4;
+  // 成员对该会话的备注名，非空时仅更新 operator 自己的
+  string alias_name = 5;
+}
+
+message UpdateGroupInfoResponse {
+  bool success = 1;
+}
+
+message ListGroupMembersRequest {
+  int64 conversation_id = 1;
+  // 是否填充昵称/头像（需回调 Account）
+  bool with_profile = 2;
+}
+
+message GroupMemberDetail {
+  ConversationMember member = 1;
+  UserBrief brief = 2;
+}
+
+message ListGroupMembersResponse {
+  repeated GroupMemberDetail members = 1;
+}
+
+service GroupService {
+  rpc CreateGroup(CreateGroupRequest) returns (CreateGroupResponse);
+  rpc AddGroupMembers(AddGroupMembersRequest) returns (AddGroupMembersResponse);
+  rpc RemoveGroupMember(RemoveGroupMemberRequest) returns (RemoveGroupMemberResponse);
+  rpc QuitGroup(QuitGroupRequest) returns (QuitGroupResponse);
+  rpc UpdateGroupInfo(UpdateGroupInfoRequest) returns (UpdateGroupInfoResponse);
+  rpc ListGroupMembers(ListGroupMembersRequest) returns (ListGroupMembersResponse);
+}

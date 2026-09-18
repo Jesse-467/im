@@ -1,0 +1,120 @@
+// 账号中心对外契约。
+//
+// 设计原则：
+//   - Account 是账号的唯一权威来源（身份、凭证、资料），Chat 只读不写；
+//   - 所有时间字段统一使用 Unix 毫秒，避免时区歧义；
+//   - 字段只增不减，编号永不复用，保证向后兼容。
+syntax = "proto3";
+
+package account.v1;
+
+option go_package = "github.com/Jesse-467/im/pkg/account/v1;accountv1";
+
+// 性别
+enum Gender {
+  GENDER_UNSPECIFIED = 0;
+  GENDER_MALE = 1;
+  GENDER_FEMALE = 2;
+}
+
+// 用户资料
+message UserProfile {
+  int64 user_id = 1;
+  string nickname = 2;
+  Gender gender = 3;
+  string avatar_url = 4;
+  // 邮箱属于隐私字段：仅 GetUser(本人) 返回，BatchGetUsers 恒为空
+  string email = 5;
+  int64 created_at = 6; // Unix 毫秒
+}
+
+// ── 认证 ────────────────────────────────────────────────────────────────────
+
+message RegisterRequest {
+  string email = 1;
+  string password = 2;
+  // 为空时由服务端生成随机昵称
+  string nickname = 3;
+  Gender gender = 4;
+}
+
+message RegisterResponse {
+  int64 user_id = 1;
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  int64 user_id = 1;
+  string access_token = 2;
+  int64 access_expire = 3; // 有效期，单位秒
+}
+
+message VerifyTokenRequest {
+  string access_token = 1;
+}
+
+message VerifyTokenResponse {
+  bool valid = 1;
+  int64 user_id = 2;
+  int64 expire_at = 3; // Unix 秒
+}
+
+// ── 用户资料 ────────────────────────────────────────────────────────────────
+
+message GetUserRequest {
+  // 查询发起方，用于判定是否返回隐私字段；0 表示系统调用
+  int64 viewer_id = 1;
+  int64 user_id = 2;
+}
+
+message GetUserResponse {
+  UserProfile profile = 1;
+}
+
+message BatchGetUsersRequest {
+  repeated int64 user_ids = 1;
+}
+
+message BatchGetUsersResponse {
+  // user_id -> 公开资料（仅含非隐私字段）
+  map<int64, UserProfile> profiles = 1;
+}
+
+message ModifyUserInfoRequest {
+  int64 user_id = 1;
+  // 空字符串表示该字段不修改
+  string nickname = 2;
+  Gender gender = 3;
+  string avatar_url = 4;
+}
+
+message ModifyUserInfoResponse {
+  bool success = 1;
+}
+
+message ResetPasswordRequest {
+  string email = 1;
+  string old_password = 2;
+  string new_password = 3;
+}
+
+message ResetPasswordResponse {
+  bool success = 1;
+}
+
+// ── 服务 ────────────────────────────────────────────────────────────────────
+
+service AccountService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc BatchGetUsers(BatchGetUsersRequest) returns (BatchGetUsersResponse);
+  rpc ModifyUserInfo(ModifyUserInfoRequest) returns (ModifyUserInfoResponse);
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
+}
