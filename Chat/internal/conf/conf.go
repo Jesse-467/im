@@ -50,14 +50,17 @@ type Config struct {
 // 云端产品均兼容 PostgreSQL 协议，因此三者共用同一驱动与 DSN 形式，
 // 差异只体现在地址、SSL 要求与连接参数上。
 type DB struct {
-	Type            string
-	Host            string
-	Port            int
-	User            string
-	Password        string
-	Name            string
-	SSLMode         string
-	DSN             string // 显式指定时优先级最高
+	Type     string
+	Host     string
+	Port     int
+	User     string
+	Password string
+	Name     string
+	SSLMode  string
+	DSN      string // 显式指定时优先级最高
+	// DebugSQL 开启后会打印每一条 SQL，仅用于本地排障。
+	// 默认关闭：后台轮询任务会高频产生 SQL，打开后会淹没真正的错误日志。
+	DebugSQL        bool
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
@@ -101,6 +104,8 @@ type MQ struct {
 	Username      string
 	Password      string
 	ConsumerGroup string
+	// TLS 表示是否启用 TLS 连接。云 Kafka 通常强制要求，本地明文部署则关闭。
+	TLS bool
 }
 
 // MessageTopic 用「主题前缀 + 领域名」拼出完整 topic 名。
@@ -189,6 +194,7 @@ func Load() (*Config, error) {
 			Name:            envString("DB_NAME", "im_chat"),
 			SSLMode:         envString("DB_SSL_MODE", "disable"),
 			DSN:             envString("DB_DSN", ""),
+			DebugSQL:        envBool("DB_DEBUG_SQL", false),
 			MaxOpenConns:    envInt("DB_MAX_OPEN_CONNS", 100),
 			MaxIdleConns:    envInt("DB_MAX_IDLE_CONNS", 20),
 			ConnMaxLifetime: envDuration("DB_CONN_MAX_LIFETIME", time.Hour),
@@ -211,6 +217,7 @@ func Load() (*Config, error) {
 			Username:      envString("MQ_USERNAME", ""),
 			Password:      envString("MQ_PASSWORD", ""),
 			ConsumerGroup: envString("MQ_CONSUMER_GROUP", ""),
+			TLS:           envBool("MQ_TLS", false),
 		},
 
 		Registry: Registry{

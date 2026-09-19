@@ -33,4 +33,9 @@ var (
 	ErrGroupOwnerCannotQuit = errors.New("群主不能直接退群")
 	ErrCannotRemoveOwner    = errors.New("不能移除群主")
 	ErrAlreadyGroupMember   = errors.New("对方已在群聊中")
+
+	// 消息
+	ErrMessageNotFound      = errors.New("消息不存在")
+	ErrMessageNotRecallable = errors.New("该消息无法撤回（不存在、非本人发送或已撤回）")
+	ErrSeqAllocFailed       = errors.New("消息序号分配失败，请重试")
 )

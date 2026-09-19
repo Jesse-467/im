@@ -71,8 +71,16 @@ func (d *Data) Cache() redis.UniversalClient { return d.cache }
 // postgres / polardb-pg / rds-pg 均兼容 PostgreSQL 协议，共用 pgx 驱动；
 // 保留类型分支是为了后续按类型注入不同的连接参数（如云数据库要求的 SSL 模式）。
 func newDB(c *conf.Config) (*gorm.DB, error) {
+	// 日志级别：生产只记错误，其余环境记慢查询与错误。
+	//
+	// 刻意不用 Info 级别：它会打印每一条 SQL，而本项目有轮询型后台任务
+	// （Outbox Relay 每 300ms 查一次），Info 级别会把日志彻底淹没，
+	// 真正的错误反而看不见。需要看 SQL 时用 GORM_DEBUG 单独开启。
 	level := gormlogger.Warn
-	if c.IsDev() {
+	if c.IsProd() {
+		level = gormlogger.Error
+	}
+	if c.DB.DebugSQL {
 		level = gormlogger.Info
 	}
 

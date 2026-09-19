@@ -121,6 +121,12 @@ func (s *HTTPServer) registerRoutes(c *conf.Config, svc *service.ChatService) {
 	api.POST("/group/message_group_info_list", svc.HTTPMessageGroupInfoList)
 	api.POST("/group/mark_read", svc.HTTPMarkRead)
 
+	// ── 消息 ──
+	api.POST("/message/upload", svc.HTTPUpload)
+	api.POST("/message/pull", svc.HTTPPull)
+	api.POST("/message/sync", svc.HTTPSync)
+	api.POST("/message/recall", svc.HTTPRecall)
+
 	// ── 好友 ──
 	api.POST("/group/add_friend", svc.HTTPAddFriend)
 	api.POST("/group/handle_friend", svc.HTTPHandleFriend)

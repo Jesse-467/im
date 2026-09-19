@@ -7,9 +7,12 @@
 package main
 
 import (
+	"context"
 	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/conf"
 	"github.com/Jesse-467/im/Chat/internal/data"
+	"github.com/Jesse-467/im/Chat/internal/mq"
+	"github.com/Jesse-467/im/Chat/internal/relay"
 	"github.com/Jesse-467/im/Chat/internal/server"
 	"github.com/Jesse-467/im/Chat/internal/service"
 	"github.com/go-kratos/kratos/v2"
@@ -45,13 +48,25 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 	friendRepo := data.NewFriendRepo(dataData)
 	friendUseCase := biz.NewFriendUseCase(friendRepo, conversationUseCase, userProvider, logger)
 	groupUseCase := biz.NewGroupUseCase(conversationRepo, conversationUseCase, userProvider, idGenerator, logger)
-	chatService := service.NewChatService(conversationUseCase, friendUseCase, groupUseCase, cfg, logger)
+	seqAllocator := data.NewSeqAllocator(dataData)
+	string2 := biz.ProvideMessageTopic(cfg)
+	messageUseCase := biz.NewMessageUseCase(messageRepo, conversationRepo, conversationUseCase, seqAllocator, idGenerator, string2, logger)
+	chatService := service.NewChatService(conversationUseCase, friendUseCase, groupUseCase, messageUseCase, cfg, logger)
 	postgresChecker := data.NewPostgresChecker(dataData)
 	redisChecker := data.NewRedisChecker(dataData)
 	v := data.NewHealthCheckers(postgresChecker, redisChecker)
 	httpServer := server.NewHTTPServer(cfg, logger, chatService, v)
-	app := newApp(cfg, logger, httpServer)
+	outboxRepo := data.NewOutboxRepo(dataData)
+	publisher, cleanup3, err := mq.NewPublisher(cfg, logger)
+	if err != nil {
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	relay := newRelay(outboxRepo, publisher, logger)
+	app := newApp(cfg, logger, httpServer, relay)
 	return app, func() {
+		cleanup3()
 		cleanup2()
 		cleanup()
 	}, nil
@@ -59,15 +74,33 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 
 // wire.go:
 
-// newApp 组装 Kratos 应用，统一管理传输层的生命周期。
+// newRelay 构造 Outbox 投递协程。
+func newRelay(outbox biz.OutboxRepo, pub mq.Publisher, logger log.Logger) *relay.Relay {
+	return relay.New(outbox, pub, logger)
+}
+
+// newApp 组装 Kratos 应用。
 //
-// 当前只挂载 HTTP（Gin）一个 server；Chat 的 gRPC 服务端将在业务层落地后接入，
-// 届时只需把 gRPC Server 追加到 kratos.Server(...) 中，
-// 优雅退出、信号处理、启动顺序仍由 kratos.App 统一负责。
+// 投递协程通过 Kratos 的生命周期钩子接入：
+//   - AfterStart 在传输层就绪后启动，避免服务还没能接受请求就开始推送；
+//   - BeforeStop 在传输层关闭前取消，让当前这一轮投递有机会收尾，
+//     而不是在投递途中被强杀、留下状态不明的事件。
 func newApp(
 	cfg *conf.Config,
 	logger log.Logger,
 	hs *server.HTTPServer,
+	r *relay.Relay,
 ) *kratos.App {
-	return kratos.New(kratos.Name(cfg.ServiceName), kratos.Version(Version), kratos.Logger(logger), kratos.StopTimeout(15*time.Second), kratos.Server(hs))
+
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+
+	return kratos.New(kratos.Name(cfg.ServiceName), kratos.Version(Version), kratos.Logger(logger), kratos.StopTimeout(15*time.Second), kratos.Server(hs), kratos.AfterStart(func(_ context.Context) error {
+		go r.Run(relayCtx)
+		return nil
+	}), kratos.BeforeStop(func(_ context.Context) error {
+
+		cancelRelay()
+		return nil
+	}),
+	)
 }

@@ -22,6 +22,7 @@ type ChatService struct {
 	convUC   *biz.ConversationUseCase
 	friendUC *biz.FriendUseCase
 	groupUC  *biz.GroupUseCase
+	msgUC    *biz.MessageUseCase
 
 	cfg *conf.Config
 	log *klog.Helper
@@ -32,6 +33,7 @@ func NewChatService(
 	convUC *biz.ConversationUseCase,
 	friendUC *biz.FriendUseCase,
 	groupUC *biz.GroupUseCase,
+	msgUC *biz.MessageUseCase,
 	cfg *conf.Config,
 	logger klog.Logger,
 ) *ChatService {
@@ -39,6 +41,7 @@ func NewChatService(
 		convUC:   convUC,
 		friendUC: friendUC,
 		groupUC:  groupUC,
+		msgUC:    msgUC,
 		cfg:      cfg,
 		log:      klog.NewHelper(klog.With(logger, "module", "service/chat")),
 	}
@@ -84,14 +87,16 @@ func bizErrCode(err error) uint32 {
 
 	case errors.Is(err, biz.ErrConversationNotFound),
 		errors.Is(err, biz.ErrFriendRequestNotFound),
-		errors.Is(err, biz.ErrGroupNotFound):
+		errors.Is(err, biz.ErrGroupNotFound),
+		errors.Is(err, biz.ErrMessageNotFound):
 		return errs.CodeNoData
 
 	case errors.Is(err, biz.ErrAlreadyFriends),
 		errors.Is(err, biz.ErrFriendRequestPending),
 		errors.Is(err, biz.ErrFriendRequestHandled),
 		errors.Is(err, biz.ErrAlreadyGroupMember),
-		errors.Is(err, biz.ErrCannotAddSelf):
+		errors.Is(err, biz.ErrCannotAddSelf),
+		errors.Is(err, biz.ErrMessageNotRecallable):
 		return errs.CodeDataExist
 
 	default:

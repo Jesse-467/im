@@ -8,14 +8,16 @@ import (
 
 // ProviderSet 是 data 层的依赖注入集合。
 //
-// 仓储构造函数的返回类型刻意声明为 biz 层声明的接口：Wire 依据返回类型把实现
-// 绑定到契约上，biz 因此只依赖接口、不 import 本包，更换存储实现无需触碰业务代码。
+// 所有仓储构造函数都返回 biz 层声明的接口类型，从而让 Wire 完成
+// 「实现 → 接口」的绑定，业务层因此只依赖接口。
 var ProviderSet = wire.NewSet(
 	NewData,
-	NewIDGenerator,
 	NewConversationRepo,
 	NewFriendRepo,
 	NewMessageRepo,
+	NewOutboxRepo,
+	NewSeqAllocator,
+	NewIDGenerator,
 	NewAccountClient,
 	NewPostgresChecker,
 	NewRedisChecker,
@@ -24,7 +26,7 @@ var ProviderSet = wire.NewSet(
 
 // NewHealthCheckers 汇总全部依赖探测器，供 /readyz 使用。
 //
-// 新增依赖（如 Kafka、etcd）时只需在此追加，探针会自动纳入。
+// 新增依赖（如消息队列）时只需在此追加，探针会自动纳入。
 func NewHealthCheckers(postgres *PostgresChecker, redis *RedisChecker) []health.Checker {
 	return []health.Checker{postgres, redis}
 }

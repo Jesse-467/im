@@ -210,16 +210,24 @@ func fromBizMember(m *biz.ConversationMember) *conversationMemberModel {
 // messageModel 是 message 表的 ORM 映射。
 type messageModel struct {
 	// 消息 ID 同样是应用侧生成的雪花值，不能让 GORM 当作自增处理。
-	ID             int64     `gorm:"column:id;primaryKey;autoIncrement:false"`
-	ConversationID int64     `gorm:"column:conversation_id;not null"`
-	Seq            int64     `gorm:"column:seq;not null"`
-	SenderID       int64     `gorm:"column:sender_id;not null"`
-	Type           int32     `gorm:"column:type;not null;default:1"`
-	Content        string    `gorm:"column:content;type:text"`
-	Extra          *string   `gorm:"column:extra;type:jsonb"`
-	ClientMsgID    string    `gorm:"column:client_msg_id;size:64;not null"`
-	Status         int32     `gorm:"column:status;not null;default:1"`
-	CreatedAt      time.Time `gorm:"column:created_at;autoCreateTime"`
+	ID             int64 `gorm:"column:id;primaryKey;autoIncrement:false"`
+	ConversationID int64 `gorm:"column:conversation_id;not null"`
+	Seq            int64 `gorm:"column:seq;not null"`
+	// SenderSeq 是发送者在本会话内的序号。
+	// 它是数据库级幂等的关键：与 client_msg_id 一起构成两条唯一约束，
+	// 使客户端换 ID 重试也无法绕过。
+	SenderSeq   int64   `gorm:"column:sender_seq;not null"`
+	SenderID    int64   `gorm:"column:sender_id;not null"`
+	Type        int32   `gorm:"column:type;not null;default:1"`
+	Content     string  `gorm:"column:content;type:text"`
+	Extra       *string `gorm:"column:extra;type:jsonb"`
+	ClientMsgID string  `gorm:"column:client_msg_id;size:64;not null"`
+	Status      int32   `gorm:"column:status;not null;default:1"`
+	// recalled_at / recalled_by 记录撤回操作，用于合规追溯。
+	// 用指针表达可空：未撤回时为 NULL，而非零值时间。
+	RecalledAt *time.Time `gorm:"column:recalled_at"`
+	RecalledBy int64      `gorm:"column:recalled_by;not null;default:0"`
+	CreatedAt  time.Time  `gorm:"column:created_at;autoCreateTime"`
 }
 
 // TableName 显式指定表名。
@@ -227,34 +235,47 @@ func (messageModel) TableName() string { return "message" }
 
 // toBizMessage 把存储模型转换为业务实体。
 func toBizMessage(m *messageModel) *biz.Message {
-	return &biz.Message{
+	msg := &biz.Message{
 		ID:             m.ID,
 		ConversationID: m.ConversationID,
 		Seq:            m.Seq,
+		SenderSeq:      m.SenderSeq,
 		SenderID:       m.SenderID,
 		Type:           m.Type,
 		Content:        m.Content,
 		Extra:          derefString(m.Extra),
 		ClientMsgID:    m.ClientMsgID,
 		Status:         m.Status,
+		RecalledBy:     m.RecalledBy,
 		CreatedAt:      m.CreatedAt,
 	}
+	if m.RecalledAt != nil {
+		msg.RecalledAt = *m.RecalledAt
+	}
+	return msg
 }
 
 // fromBizMessage 把业务实体转换为存储模型。
 func fromBizMessage(m *biz.Message) *messageModel {
-	return &messageModel{
+	out := &messageModel{
 		ID:             m.ID,
 		ConversationID: m.ConversationID,
 		Seq:            m.Seq,
+		SenderSeq:      m.SenderSeq,
 		SenderID:       m.SenderID,
 		Type:           m.Type,
 		Content:        m.Content,
 		Extra:          nullableJSON(m.Extra),
 		ClientMsgID:    m.ClientMsgID,
 		Status:         m.Status,
+		RecalledBy:     m.RecalledBy,
 		CreatedAt:      m.CreatedAt,
 	}
+	// 零值时间表示「未撤回」，写成 NULL 而不是 0001-01-01
+	if !m.RecalledAt.IsZero() {
+		out.RecalledAt = &m.RecalledAt
+	}
+	return out
 }
 
 // ── 好友关系 ────────────────────────────────────────────────────────────────
