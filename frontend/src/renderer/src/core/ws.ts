@@ -13,6 +13,7 @@ export type WsStatus = 'idle' | 'connecting' | 'open' | 'closed'
 
 type MessageHandler = (payload: WsMessagePayload) => void
 type StatusHandler = (status: WsStatus) => void
+type KickedHandler = (reason: string) => void
 
 class WsClient {
   private ws: WebSocket | null = null
@@ -23,6 +24,7 @@ class WsClient {
   private closedByUser = false
   private messageHandlers = new Set<MessageHandler>()
   private statusHandlers = new Set<StatusHandler>()
+  private kickedHandlers = new Set<KickedHandler>()
 
   get isOpen(): boolean {
     return this.ws?.readyState === WebSocket.OPEN
@@ -36,6 +38,11 @@ class WsClient {
   onStatus(handler: StatusHandler): () => void {
     this.statusHandlers.add(handler)
     return () => this.statusHandlers.delete(handler)
+  }
+
+  onKicked(handler: KickedHandler): () => void {
+    this.kickedHandlers.add(handler)
+    return () => this.kickedHandlers.delete(handler)
   }
 
   private emitStatus(status: WsStatus): void {
@@ -69,6 +76,17 @@ class WsClient {
         if (frame.type === 'message') {
           const payload = frame.data as WsMessagePayload
           for (const h of this.messageHandlers) h(payload)
+        }
+        if (frame.type === 'kicked') {
+          this.closedByUser = true
+          this.token = ''
+          this.cleanupTimers()
+          const reason = typeof frame.data === 'string' ? frame.data : '登录状态已失效，请重新登录'
+          const active = this.ws
+          this.ws = null
+          active?.close()
+          this.emitStatus('closed')
+          for (const h of this.kickedHandlers) h(reason)
         }
         // pong / error：心跳维持静默，错误帧由业务层触发刷新兜底
       } catch {

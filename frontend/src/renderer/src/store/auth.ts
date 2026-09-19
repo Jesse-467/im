@@ -1,7 +1,14 @@
 import { create } from 'zustand'
-import { apiLogin, apiModifyPersonalInfo, apiPersonalInfo, apiRegister } from '@/api/account'
-import { ApiError, CODE_UNAUTHORIZED } from '@/api/client'
-import { setToken, getToken } from '@/core/session'
+import {
+  apiLogin,
+  apiLogout,
+  apiModifyPersonalInfo,
+  apiPersonalInfo,
+  apiRegister
+} from '@/api/account'
+import { ApiError, CODE_TOKEN_REVOKED, CODE_UNAUTHORIZED } from '@/api/client'
+import { setToken, getDeviceId, getToken } from '@/core/session'
+import { wsClient } from '@/core/ws'
 import type { Profile } from '@/api/types'
 import { toast } from './toast'
 
@@ -10,7 +17,7 @@ export type AuthStatus = 'boot' | 'guest' | 'authed'
 interface AuthState {
   status: AuthStatus
   token: string
-  userId: number
+  userId: string
   profile: Profile | null
 
   bootstrap: () => Promise<void>
@@ -29,7 +36,7 @@ interface AuthState {
 export const useAuthStore = create<AuthState>((set, get) => ({
   status: 'boot',
   token: '',
-  userId: 0,
+  userId: '',
   profile: null,
 
   bootstrap: async () => {
@@ -42,14 +49,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       await get().loadProfile()
     } catch (err) {
-      if (err instanceof ApiError && err.code === CODE_UNAUTHORIZED) {
+      if (err instanceof ApiError && (err.code === CODE_UNAUTHORIZED || err.code === CODE_TOKEN_REVOKED)) {
         get().logout()
       }
     }
   },
 
   login: async (email, password) => {
-    const res = await apiLogin(email, password)
+    const res = await apiLogin(email, password, getDeviceId(), 'desktop')
     setToken(res.accessToken)
     set({ token: res.accessToken, userId: res.userId, status: 'authed' })
     await get().loadProfile().catch(() => undefined)
@@ -63,8 +70,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
+    if (getToken()) void apiLogout(getDeviceId()).catch(() => undefined)
+    wsClient.close()
     setToken('')
-    set({ status: 'guest', token: '', userId: 0, profile: null })
+    set({ status: 'guest', token: '', userId: '', profile: null })
   },
 
   loadProfile: async () => {

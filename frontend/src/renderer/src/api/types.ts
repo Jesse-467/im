@@ -10,10 +10,13 @@ export interface ApiBody<T> {
   data: T
 }
 
+/** 服务端使用 int64 雪花 ID；渲染层必须始终按字符串处理，避免 JS 精度丢失。 */
+export type EntityId = string
+
 // ── Account 服务 ────────────────────────────────────────────────────────────
 
 export interface Profile {
-  userId: number
+  userId: EntityId
   nickName: string
   gender: number // 0 保密 1 男 2 女
   email: string
@@ -21,19 +24,20 @@ export interface Profile {
 }
 
 export interface LoginResult {
-  userId: number
+  userId: EntityId
   accessToken: string
   accessExpire: number
+  evictedDevices?: string[]
 }
 
 // ── Chat 服务 ───────────────────────────────────────────────────────────────
 
 export interface ChatMsg {
-  id: number
-  conversationId: number
+  id: EntityId
+  conversationId: EntityId
   groupId: string
   seq: number
-  senderId: number
+  senderId: EntityId
   type: number // 1 文本
   content: string
   uuid: string
@@ -42,7 +46,7 @@ export interface ChatMsg {
 
 /** 会话列表项（对齐 conversationItemDTO） */
 export interface Conversation {
-  conversationId: number
+  conversationId: EntityId
   groupId: string
   type: number // 1 单聊 2 群聊
   name: string
@@ -55,7 +59,7 @@ export interface Conversation {
 }
 
 export interface Friend {
-  userId: number
+  userId: EntityId
   nickName: string
   avatarUrl: string
   remark: string
@@ -63,9 +67,9 @@ export interface Friend {
 
 /** 好友申请：status 0 待处理 1 已同意 2 已拒绝 3 已过期 */
 export interface FriendRequest {
-  id: number
-  fromUid: number
-  toUid: number
+  id: EntityId
+  fromUid: EntityId
+  toUid: EntityId
   applyMsg: string
   status: number
   createdAt: number
@@ -73,7 +77,7 @@ export interface FriendRequest {
 }
 
 export interface GroupMember {
-  userId: number
+  userId: EntityId
   nickName: string
   avatarUrl: string
   aliasName: string
@@ -89,8 +93,8 @@ export interface PullResult {
 }
 
 export interface SendResult {
-  id: number
-  conversationId: number
+  id: EntityId
+  conversationId: EntityId
   groupId: string
   seq: number
   createTime: number
@@ -98,26 +102,26 @@ export interface SendResult {
 }
 
 export interface HandleFriendResult {
-  conversationId: number
+  conversationId: EntityId
   groupId: string
 }
 
 export interface CreateGroupResult {
-  conversationId: number
+  conversationId: EntityId
   groupId: string
   addedCount: number
 }
 
 /** WebSocket 下行帧（对齐 ws.Message） */
 export interface WsFrame<T = unknown> {
-  type: 'message' | 'pong' | 'error'
+  type: 'message' | 'pong' | 'error' | 'kicked'
   data: T
 }
 
 /** 发送回执（sendAckPayload），也用于新消息推送信令 */
 export interface WsMessagePayload {
-  conversationId: number
-  messageId: number
+  conversationId: EntityId
+  messageId: EntityId
   seq: number
   clientMsgId: string
   duplicated: boolean

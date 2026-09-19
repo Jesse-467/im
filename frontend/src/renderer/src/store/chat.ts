@@ -15,7 +15,7 @@ import {
   apiSendMessage,
   apiSyncMessages
 } from '@/api/chat'
-import { ApiError, CODE_UNAUTHORIZED } from '@/api/client'
+import { ApiError, CODE_TOKEN_REVOKED, CODE_UNAUTHORIZED } from '@/api/client'
 import { getToken } from '@/core/session'
 import { wsClient, type WsStatus } from '@/core/ws'
 import type { Conversation, Friend, FriendRequest, GroupMember, WsMessagePayload } from '@/api/types'
@@ -24,9 +24,9 @@ import { toast } from './toast'
 
 /** 本地消息：服务端消息 + 发送中间态（pending/failed/recalled） */
 export interface LocalMsg {
-  id: number // pending 时为 0
+  id: string // pending 时为空字符串
   seq: number
-  senderId: number
+  senderId: string
   type: number
   content: string
   uuid: string
@@ -39,9 +39,9 @@ export interface LocalMsg {
 const MSG_PAGE_SIZE = 50
 
 function toLocalMsg(m: {
-  id: number
+  id: string
   seq: number
-  senderId: number
+  senderId: string
   type: number
   content: string
   uuid: string
@@ -72,9 +72,9 @@ function sortConversations(list: Conversation[]): Conversation[] {
 /** 把回执/HTTP 结果落到 pending 消息上 */
 function settleMessage(
   state: ChatState,
-  conversationId: number,
+  conversationId: string,
   uuid: string,
-  patch: { id: number; seq: number; createTime: number; failed?: boolean }
+  patch: { id: string; seq: number; createTime: number; failed?: boolean }
 ): Partial<ChatState> {
   const list = state.messagesByConv[conversationId]
   if (!list) return {}
@@ -95,18 +95,18 @@ function settleMessage(
 interface ChatState {
   conversations: Conversation[]
   convLoaded: boolean
-  activeConvId: number | null
+  activeConvId: string | null
 
-  messagesByConv: Record<number, LocalMsg[]>
-  maxSeqByConv: Record<number, number>
-  membersByConv: Record<number, GroupMember[]>
+  messagesByConv: Record<string, LocalMsg[]>
+  maxSeqByConv: Record<string, number>
+  membersByConv: Record<string, GroupMember[]>
 
   friends: Friend[]
   friendRequests: FriendRequest[]
 
   /** 单聊会话 → 对端 userId（「好友 → 会话」映射） */
-  peerByConv: Record<number, number>
-  convByPeer: Record<number, number>
+  peerByConv: Record<string, string>
+  convByPeer: Record<string, string>
 
   wsStatus: WsStatus
 
@@ -114,24 +114,25 @@ interface ChatState {
   handleWsPayload: (payload: WsMessagePayload) => Promise<void>
   refresh: () => Promise<void>
   refreshSlow: () => Promise<void>
-  openConversation: (conversationId: number) => Promise<void>
+  openConversation: (conversationId: string) => Promise<void>
   closeConversation: () => void
   syncActive: () => Promise<void>
-  sendText: (conversationId: number, text: string) => Promise<void>
-  recall: (conversationId: number, messageId: number) => Promise<void>
+  sendText: (conversationId: string, text: string) => Promise<void>
+  recall: (conversationId: string, messageId: string) => Promise<void>
 
   loadFriends: () => Promise<void>
   loadRequests: () => Promise<void>
-  addFriend: (userId: number, applyMsg: string) => Promise<void>
-  handleRequest: (requestId: number, agree: boolean) => Promise<void>
+  addFriend: (userId: string, applyMsg: string) => Promise<void>
+  handleRequest: (requestId: string, agree: boolean) => Promise<void>
 
-  createGroup: (groupName: string, memberIds: number[]) => Promise<void>
-  quitGroup: (conversationId: number) => Promise<void>
+  createGroup: (groupName: string, memberIds: string[]) => Promise<void>
+  quitGroup: (conversationId: string) => Promise<void>
 
   reset: () => void
 }
 
 let peerResolving = false
+let chatBindingsReady = false
 
 export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
@@ -150,10 +151,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const token = getToken()
     if (!token) return
 
-    wsClient.onStatus((status) => set({ wsStatus: status }))
-    wsClient.onMessage((payload) => {
-      void get().handleWsPayload(payload)
-    })
+    if (!chatBindingsReady) {
+      wsClient.onStatus((status) => set({ wsStatus: status }))
+      wsClient.onMessage((payload) => {
+        void get().handleWsPayload(payload)
+      })
+      wsClient.onKicked((reason) => {
+        useAuthStore.getState().logout()
+        useChatStore.getState().reset()
+        toast(reason || '登录状态已失效，请重新登录', 'error')
+      })
+      chatBindingsReady = true
+    }
     wsClient.connect(token)
   },
 
@@ -275,7 +284,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const meId = useAuthStore.getState().userId
     const uuid = crypto.randomUUID()
     const optimistic: LocalMsg = {
-      id: 0,
+      id: '',
       seq: 0,
       senderId: meId,
       type: 1,
@@ -405,7 +414,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 // ── 内部辅助（模块私有） ────────────────────────────────────────────────────
 
 /** HTTP 降级/幂等重发：接口返回后把结果落到 pending 消息上 */
-async function confirmSend(conversationId: number, uuid: string): Promise<void> {
+async function confirmSend(conversationId: string, uuid: string): Promise<void> {
   const st = useChatStore.getState()
   const pending = st.messagesByConv[conversationId]?.find((m) => m.uuid === uuid)
   if (!pending) return
@@ -422,13 +431,13 @@ async function confirmSend(conversationId: number, uuid: string): Promise<void> 
   } catch (err) {
     handleAuthError(err)
     useChatStore.setState((s) =>
-      settleMessage(s, conversationId, uuid, { id: 0, seq: 0, createTime: 0, failed: true })
+      settleMessage(s, conversationId, uuid, { id: '', seq: 0, createTime: 0, failed: true })
     )
     toast(err instanceof ApiError ? err.message : '发送失败', 'error')
   }
 }
 
-function markReadIfActive(conversationId: number): void {
+function markReadIfActive(conversationId: string): void {
   const st = useChatStore.getState()
   if (st.activeConvId !== conversationId) return
   const maxSeq = st.maxSeqByConv[conversationId] ?? 0
@@ -487,7 +496,7 @@ async function resolvePeers(): Promise<void> {
 }
 
 function handleAuthError(err: unknown): void {
-  if (err instanceof ApiError && err.code === CODE_UNAUTHORIZED) {
+  if (err instanceof ApiError && (err.code === CODE_UNAUTHORIZED || err.code === CODE_TOKEN_REVOKED)) {
     useAuthStore.getState().logout()
     useChatStore.getState().reset()
     toast('登录已过期，请重新登录', 'error')

@@ -6,13 +6,34 @@
  */
 
 const KEY = 'im.token'
+const DEVICE_KEY = 'im.device-id'
 
 let cached = ''
+let deviceId = ''
 
 try {
   cached = localStorage.getItem(KEY) ?? ''
 } catch {
   cached = ''
+}
+
+try {
+  deviceId = localStorage.getItem(DEVICE_KEY) ?? ''
+} catch {
+  deviceId = ''
+}
+
+if (!deviceId) {
+  try {
+    deviceId = crypto.randomUUID()
+  } catch {
+    deviceId = `desktop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  }
+  try {
+    localStorage.setItem(DEVICE_KEY, deviceId)
+  } catch {
+    /* 存储不可用时使用本进程内的设备标识 */
+  }
 }
 
 export function getToken(): string {
@@ -27,4 +48,9 @@ export function setToken(token: string): void {
   } catch {
     /* 存储不可用时静默降级为内存态 */
   }
+}
+
+/** 同一 Electron 实例内稳定的设备标识，用于服务端多设备计数。 */
+export function getDeviceId(): string {
+  return deviceId
 }

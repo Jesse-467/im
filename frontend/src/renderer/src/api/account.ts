@@ -12,16 +12,37 @@ export function apiRegister(input: {
   return post('account', '/api/user/register', input)
 }
 
-export function apiLogin(email: string, password: string): Promise<LoginResult> {
-  return post('account', '/api/user/login', { email, password })
+type RawProfile = Omit<Profile, 'userId'> & { userId: string | number }
+type RawLoginResult = Omit<LoginResult, 'userId'> & { userId: string | number }
+
+function normalizeProfile(profile: RawProfile): Profile {
+  return { ...profile, userId: String(profile.userId) }
+}
+
+export function apiLogin(
+  email: string,
+  password: string,
+  deviceId: string,
+  platform = 'desktop'
+): Promise<LoginResult> {
+  return post<RawLoginResult>('account', '/api/user/login', {
+    email,
+    password,
+    deviceId,
+    platform
+  }).then((res) => ({ ...res, userId: String(res.userId) }))
+}
+
+export function apiLogout(deviceId: string): Promise<{ success: boolean }> {
+  return post('account', '/api/user/logout', { deviceId })
 }
 
 export function apiPersonalInfo(): Promise<Profile> {
-  return post('account', '/api/user/personal_info', {})
+  return post<RawProfile>('account', '/api/user/personal_info', {}).then(normalizeProfile)
 }
 
-export function apiQueryUserInfo(userId: number): Promise<Profile> {
-  return post('account', '/api/user/query_user_info', { userId })
+export function apiQueryUserInfo(userId: string): Promise<Profile> {
+  return post<RawProfile>('account', '/api/user/query_user_info', { userId }).then(normalizeProfile)
 }
 
 export function apiModifyPersonalInfo(input: {

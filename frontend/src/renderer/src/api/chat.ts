@@ -19,14 +19,14 @@ export function apiConversationList(): Promise<{ list: Conversation[] }> {
   return post('chat', '/api/group/message_group_info_list', {})
 }
 
-export function apiMarkRead(conversationId: number, seq: number): Promise<{ success: boolean }> {
+export function apiMarkRead(conversationId: string, seq: number): Promise<{ success: boolean }> {
   return post('chat', '/api/group/mark_read', { conversationId, seq })
 }
 
 // ── 消息 ──
 
 export function apiSendMessage(
-  conversationId: number,
+  conversationId: string,
   content: string,
   clientMsgId: string
 ): Promise<SendResult> {
@@ -38,12 +38,12 @@ export function apiSendMessage(
   })
 }
 
-export function apiPullMessages(conversationId: number, limit: number): Promise<PullResult> {
+export function apiPullMessages(conversationId: string, limit: number): Promise<PullResult> {
   return post('chat', '/api/message/pull', { conversationId, limit })
 }
 
 export function apiSyncMessages(
-  conversationId: number,
+  conversationId: string,
   fromSeq: number,
   limit: number
 ): Promise<PullResult> {
@@ -51,8 +51,8 @@ export function apiSyncMessages(
 }
 
 export function apiRecallMessage(
-  conversationId: number,
-  messageId: number
+  conversationId: string,
+  messageId: string
 ): Promise<{ success: boolean }> {
   return post('chat', '/api/message/recall', { conversationId, messageId })
 }
@@ -60,13 +60,13 @@ export function apiRecallMessage(
 // ── 好友 ──
 
 export function apiAddFriend(
-  userId: number,
+  userId: string,
   applyMsg: string
-): Promise<{ requestId: number; alreadyFriends: boolean }> {
+): Promise<{ requestId: string; alreadyFriends: boolean }> {
   return post('chat', '/api/group/add_friend', { userId, applyMsg })
 }
 
-export function apiHandleFriend(requestId: number, isAgree: boolean): Promise<HandleFriendResult> {
+export function apiHandleFriend(requestId: string, isAgree: boolean): Promise<HandleFriendResult> {
   return post('chat', '/api/group/handle_friend', { requestId, isAgree })
 }
 
@@ -84,20 +84,20 @@ export function apiFriendRequestList(
 
 export function apiCreateGroupChat(
   groupName: string,
-  memberIds: number[]
+  memberIds: string[]
 ): Promise<CreateGroupResult> {
   return post('chat', '/api/group/create_group_chat', { groupName, memberIds })
 }
 
-export function apiGroupMemberList(conversationId: number): Promise<{ list: GroupMember[] }> {
+export function apiGroupMemberList(conversationId: string): Promise<{ list: GroupMember[] }> {
   return post('chat', '/api/group/member_list', { conversationId })
 }
 
-export function apiGroupUserList(conversationId: number): Promise<{ list: number[] }> {
+export function apiGroupUserList(conversationId: string): Promise<{ list: string[] }> {
   return post('chat', '/api/group/group_user_list', { conversationId })
 }
 
-export function apiQuitGroup(conversationId: number): Promise<{ success: boolean }> {
+export function apiQuitGroup(conversationId: string): Promise<{ success: boolean }> {
   return post('chat', '/api/group/quit', { conversationId })
 }
 

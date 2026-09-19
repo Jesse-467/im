@@ -55,7 +55,7 @@ export function ContactsView({ onNav }: { onNav: (key: NavKey) => void }): JSX.E
     )
   }, [friends, keyword])
 
-  const openChatWith = (userId: number): void => {
+  const openChatWith = (userId: string): void => {
     const convId = convByPeer[userId]
     if (!convId) {
       toast('会话暂未同步，稍等片刻再试', 'info')
@@ -200,9 +200,9 @@ function RequestCard({
   index
 }: {
   req: {
-    id: number
-    fromUid: number
-    toUid: number
+    id: string
+    fromUid: string
+    toUid: string
     applyMsg: string
     status: number
     createdAt: number
@@ -286,8 +286,8 @@ function AddFriendModal({ open, onClose }: { open: boolean; onClose: () => void 
   const addFriend = useChatStore((s) => s.addFriend)
 
   const submit = async (): Promise<void> => {
-    const id = Number(userId.trim())
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = userId.trim()
+    if (!/^\d+$/.test(id) || id === '0' || id.length > 19) {
       toast('请输入正确的用户 ID', 'error')
       return
     }
@@ -345,10 +345,10 @@ function CreateGroupModal({ open, onClose }: { open: boolean; onClose: () => voi
   const friends = useChatStore((s) => s.friends)
   const createGroup = useChatStore((s) => s.createGroup)
   const [groupName, setGroupName] = useState('')
-  const [picked, setPicked] = useState<number[]>([])
+  const [picked, setPicked] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
 
-  const toggle = (userId: number): void => {
+  const toggle = (userId: string): void => {
     setPicked((prev) =>
       prev.includes(userId) ? prev.filter((x) => x !== userId) : [...prev, userId]
     )

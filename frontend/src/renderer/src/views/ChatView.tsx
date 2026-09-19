@@ -225,7 +225,7 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
     void sendText(conv.conversationId, text)
   }
 
-  const memberName = (senderId: number): string => {
+  const memberName = (senderId: string): string => {
     if (senderId === meId) return profile?.nickName ?? '我'
     const m = members?.find((x) => x.userId === senderId)
     return m?.nickName || m?.aliasName || `用户 ${senderId}`
@@ -289,7 +289,7 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
                       ? profile?.avatarUrl
                       : members?.find((x) => x.userId === msg.senderId)?.avatarUrl
                   }
-                  recallable={msg.senderId === meId && !msg.pending && !msg.failed && msg.id > 0}
+                  recallable={msg.senderId === meId && !msg.pending && !msg.failed && msg.id !== ''}
                   onContextMenu={(x, y) => setMenu({ x, y, msg })}
                 />
               </div>

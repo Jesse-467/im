@@ -27,6 +27,8 @@ function baseUrlOf(service: ServiceName): string {
 
 /** 业务码：未认证（Chat/Account 两服务数值语义一致） */
 export const CODE_UNAUTHORIZED = 4001
+/** 令牌已被吊销（登出、被其他设备挤下线或修改密码）。 */
+export const CODE_TOKEN_REVOKED = 4007
 
 /**
  * 发起一次业务 POST 请求。
