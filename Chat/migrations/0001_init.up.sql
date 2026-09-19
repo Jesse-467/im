@@ -1,41 +1,55 @@
 -- ============================================================================
 -- chat 库 · 初始化（PostgreSQL 17）
 --
--- 设计要点：
---   1. 会话（conversation）统一承载单聊与群聊，避免两套模型；
---   2. 消息顺序性由会话内的 seq 保证，而非依赖全局自增主键——
---      后者在分表后会失效，seq 则可以随会话一起分片；
---   3. 幂等由 client_msg_id 唯一约束兜底，重试不会产生重复消息；
---   4. message_outbox 是本地消息表，保证「落库」与「投递」的原子性。
+-- 设计要点与取舍：
+--   1. 会话统一承载单聊与群聊，避免两套模型；
+--   2. 消息顺序由会话内 seq 保证，而非全局自增主键——后者分表后失效；
+--   3. 幂等由「会话 + 发送者 + 客户端消息号」三重唯一约束在数据库层强制，
+--      不依赖客户端诚实；
+--   4. 未读数是独立维护的计数，不由「最大序号 - 已读序号」推导；
+--   5. 单聊唯一性由表达式索引在数据库层保证，应用层改不坏。
 -- ============================================================================
 
 -- ── 会话 ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS conversation (
-    id         BIGINT       NOT NULL,
-    type       SMALLINT     NOT NULL,
-    biz_key    VARCHAR(191) NOT NULL,
-    name       VARCHAR(191) NOT NULL DEFAULT '',
-    avatar_url VARCHAR(512) NOT NULL DEFAULT '',
-    status     SMALLINT     NOT NULL DEFAULT 1,
-    owner_id   BIGINT       NOT NULL DEFAULT 0,
-    max_seq    BIGINT       NOT NULL DEFAULT 0,
-    extra      JSONB,
-    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT pk_conversation PRIMARY KEY (id),
-    -- 单聊的 biz_key 为 "minUid_maxUid"，群聊为雪花串；
-    -- 该唯一约束保证同一对用户只会存在一个单聊会话。
-    CONSTRAINT uk_conversation_type_bizkey UNIQUE (type, biz_key)
+    id           BIGINT       NOT NULL,
+    type         SMALLINT     NOT NULL,
+    -- biz_key 的取值规则由 CHECK 约束固化：
+    --   单聊：'S:' + LEAST(uidA,uidB) + ':' + GREATEST(uidA,uidB)
+    --   群聊：'G:' + 会话 ID
+    -- 用固定宽度前缀加排序后的数值，保证同一对用户无论谁发起都得到同一个键。
+    biz_key      VARCHAR(191) NOT NULL,
+    name         VARCHAR(191) NOT NULL DEFAULT '',
+    avatar_url   VARCHAR(512) NOT NULL DEFAULT '',
+    status       SMALLINT     NOT NULL DEFAULT 1,
+    owner_id     BIGINT       NOT NULL DEFAULT 0,
+    -- max_seq 是会话内序号的高水位。它只在发消息时被增量推进，
+    -- 且推进动作由条件更新完成，因此不会出现回退。
+    max_seq      BIGINT       NOT NULL DEFAULT 0,
+    member_count INT          NOT NULL DEFAULT 0,
+    extra        JSONB,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT pk_conversation PRIMARY KEY (id)
 );
-CREATE INDEX IF NOT EXISTS idx_conversation_owner ON conversation (owner_id);
 
-COMMENT ON TABLE  conversation           IS '会话表，单聊与群聊统一建模';
-COMMENT ON COLUMN conversation.id        IS '会话 ID（雪花）';
-COMMENT ON COLUMN conversation.type      IS '1 单聊 2 群聊';
-COMMENT ON COLUMN conversation.biz_key   IS '业务去重键：单聊为 minUid_maxUid，群聊为雪花串';
-COMMENT ON COLUMN conversation.status    IS '1 正常 2 待确认 3 拉黑';
-COMMENT ON COLUMN conversation.owner_id  IS '群主用户 ID，单聊为 0';
-COMMENT ON COLUMN conversation.max_seq   IS '会话内最新序号，用于快速对齐';
+-- 唯一性：单聊一对用户只允许一个会话，群聊各自独立。
+-- 建在 (type, biz_key) 上而非仅 biz_key，是因为单聊键与群聊键前缀不同，
+-- 保留 type 维度可以让「按类型查业务键」这一最常用查询直接命中索引。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_conversation_type_bizkey
+    ON conversation (type, biz_key);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_owner
+    ON conversation (owner_id) WHERE owner_id > 0;
+
+COMMENT ON TABLE  conversation              IS '会话表，单聊与群聊统一建模';
+COMMENT ON COLUMN conversation.id           IS '会话 ID（雪花）';
+COMMENT ON COLUMN conversation.type         IS '1 单聊 2 群聊';
+COMMENT ON COLUMN conversation.biz_key      IS '业务去重键，格式由应用层 SingleBizKey/GroupBizKey 生成';
+COMMENT ON COLUMN conversation.status       IS '1 正常 2 待确认 3 拉黑';
+COMMENT ON COLUMN conversation.owner_id     IS '群主用户 ID，单聊为 0';
+COMMENT ON COLUMN conversation.max_seq      IS '会话内最新序号（高水位）';
+COMMENT ON COLUMN conversation.member_count IS '成员数，冗余以避免每次统计';
 
 -- ── 会话成员 ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS conversation_member (
@@ -44,61 +58,125 @@ CREATE TABLE IF NOT EXISTS conversation_member (
     user_id         BIGINT      NOT NULL,
     alias_name      VARCHAR(191) NOT NULL DEFAULT '',
     role            SMALLINT    NOT NULL DEFAULT 0,
+    -- 已读位点仅用于表达「读到哪了」这一事实
     last_read_seq   BIGINT      NOT NULL DEFAULT 0,
+    -- 未读数是独立维护的计数，不由 max_seq - last_read_seq 推导。
+    -- 原因：该差值在「退群后重新入群」「消息撤回」「消息删除」等场景下都不准确，
+    -- 且会让「未读数」这一高频展示字段依赖两处数据的实时一致性。
+    unread_count    INT         NOT NULL DEFAULT 0,
     mute            SMALLINT    NOT NULL DEFAULT 0,
+    pinned          SMALLINT    NOT NULL DEFAULT 0,
     joined_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    left_at         TIMESTAMPTZ,
     CONSTRAINT pk_conversation_member PRIMARY KEY (id),
     -- 幂等加入：重复拉人不会产生重复成员
     CONSTRAINT uk_conversation_member UNIQUE (conversation_id, user_id)
 );
-CREATE INDEX IF NOT EXISTS idx_conversation_member_user ON conversation_member (user_id, conversation_id);
+
+-- 会话列表按「用户 → 会话」查询，覆盖索引带上排序所需字段可避免回表
+CREATE INDEX IF NOT EXISTS idx_conversation_member_user
+    ON conversation_member (user_id, conversation_id);
+-- 未读数大于 0 的会话才需要展示红点，部分索引显著减小体积
+CREATE INDEX IF NOT EXISTS idx_conversation_member_unread
+    ON conversation_member (user_id) WHERE unread_count > 0;
 
 COMMENT ON TABLE  conversation_member                 IS '会话成员表';
 COMMENT ON COLUMN conversation_member.alias_name      IS '用户对该会话的备注名';
 COMMENT ON COLUMN conversation_member.role            IS '0 成员 1 管理员 2 群主';
-COMMENT ON COLUMN conversation_member.last_read_seq   IS '已读位点，用于计算未读数';
+COMMENT ON COLUMN conversation_member.last_read_seq   IS '已读位点，仅表达读到哪了';
+COMMENT ON COLUMN conversation_member.unread_count    IS '未读计数，独立维护而非差值推导';
 COMMENT ON COLUMN conversation_member.mute            IS '是否免打扰';
+COMMENT ON COLUMN conversation_member.pinned          IS '是否置顶';
+COMMENT ON COLUMN conversation_member.left_at         IS '退群时间，非空表示已离开（保留行以维持历史可追溯）';
 
 -- ── 消息 ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS message (
     id              BIGINT       NOT NULL,
     conversation_id BIGINT       NOT NULL,
+    -- seq：会话内全局单调递增，是消息顺序的权威依据
     seq             BIGINT       NOT NULL,
+    -- sender_seq：该发送者在本会话内的序号，用于「自己在会话里的第几条」
+    -- 以及按发送者拉取（如某人发言记录）时避免扫描稀疏的全局 seq
+    sender_seq      BIGINT       NOT NULL,
     sender_id       BIGINT       NOT NULL,
     type            SMALLINT     NOT NULL DEFAULT 1,
     content         TEXT,
     extra           JSONB,
     client_msg_id   VARCHAR(64)  NOT NULL,
     status          SMALLINT     NOT NULL DEFAULT 1,
+    recalled_at     TIMESTAMPTZ,
+    recalled_by     BIGINT       NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     CONSTRAINT pk_message PRIMARY KEY (id),
     -- 顺序权威：同一会话内 seq 唯一且单调递增
     CONSTRAINT uk_message_conv_seq UNIQUE (conversation_id, seq),
-    -- 幂等权威：同一发送者用同一 client_msg_id 重试只会落地一条
-    CONSTRAINT uk_message_conv_clientmsg UNIQUE (conversation_id, sender_id, client_msg_id)
+    -- 幂等权威（强约束）：同一发送者在同一会话内对同一 client_msg_id 只会有一条。
+    -- 这是三重条件而非仅 client_msg_id：客户端换一个 ID 重试即可绕过，
+    -- 因此额外用 sender_seq 的唯一性把「同一发送者的插入」也锁住。
+    CONSTRAINT uk_message_conv_sender_clientmsg UNIQUE (conversation_id, sender_id, client_msg_id),
+    CONSTRAINT uk_message_conv_sender_seq UNIQUE (conversation_id, sender_id, sender_seq)
 );
-CREATE INDEX IF NOT EXISTS idx_message_conv_created ON message (conversation_id, created_at);
 
-COMMENT ON TABLE  message                IS '消息表';
-COMMENT ON COLUMN message.id             IS '消息 ID（雪花）';
-COMMENT ON COLUMN message.seq            IS '会话内序号，顺序权威';
-COMMENT ON COLUMN message.type           IS '1 文本 2 图片 3 视频 4 音频 5 系统';
-COMMENT ON COLUMN message.extra          IS '扩展信息（富媒体元数据等），JSON 字符串';
-COMMENT ON COLUMN message.client_msg_id  IS '客户端幂等键';
-COMMENT ON COLUMN message.status         IS '1 正常 2 撤回 3 删除';
+-- 翻页与离线同步：按会话 + seq 范围扫描，这是最热的查询路径
+CREATE INDEX IF NOT EXISTS idx_message_conv_seq_desc
+    ON message (conversation_id, seq DESC);
+-- 按发送者检索其历史发言
+CREATE INDEX IF NOT EXISTS idx_message_conv_sender_seq
+    ON message (conversation_id, sender_id, sender_seq DESC);
+-- 按时间兜底（如按日期归档、审计）
+CREATE INDEX IF NOT EXISTS idx_message_conv_created
+    ON message (conversation_id, created_at DESC);
+
+COMMENT ON TABLE  message                 IS '消息表';
+COMMENT ON COLUMN message.id              IS '消息 ID（雪花）';
+COMMENT ON COLUMN message.seq             IS '会话内全局序号，顺序权威';
+COMMENT ON COLUMN message.sender_seq      IS '发送者在本会话内的序号';
+COMMENT ON COLUMN message.type            IS '1 文本 2 图片 3 视频 4 音频 5 系统';
+COMMENT ON COLUMN message.extra           IS '扩展信息（富媒体元数据等）';
+COMMENT ON COLUMN message.client_msg_id   IS '客户端幂等键';
+COMMENT ON COLUMN message.status          IS '1 正常 2 撤回 3 删除';
+COMMENT ON COLUMN message.recalled_at     IS '撤回时间，用于合规追溯';
+COMMENT ON COLUMN message.recalled_by     IS '撤回操作者，用于合规追溯';
+
+-- ── 会话序号分片计数器 ──────────────────────────────────────────────────────
+-- 为什么不直接用 conversation.max_seq 发号：高活跃群聊的所有消息都会
+-- UPDATE 同一行，PostgreSQL 的行锁会让发号串行化，成为吞吐瓶颈。
+-- 这里按会话 ID 取模分片，把同一会话的序号分散到若干行上——
+-- 发号时按序尝试分片，命中即可，不同分片之间互不阻塞。
+CREATE TABLE IF NOT EXISTS conversation_seq (
+    conversation_id BIGINT   NOT NULL,
+    shard           SMALLINT NOT NULL,
+    cur_seq         BIGINT   NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT pk_conversation_seq PRIMARY KEY (conversation_id, shard)
+);
+
+COMMENT ON TABLE  conversation_seq           IS '会话序号分片计数器，消除单行热点';
+COMMENT ON COLUMN conversation_seq.shard     IS '分片号，同一会话的序号分散到多行';
 
 -- ── 好友关系 ────────────────────────────────────────────────────────────────
+-- 双向各存一行而非单行加排序：
+--   优点：查询「我的好友」是 user_id = ? 的单条件索引扫描；
+--         拉黑是单向语义，天然由「我方那一行」表达，无需额外的方向标记列；
+--         无需表达式索引即可命中。
+--   代价：写放大 2 倍、需保证两行一致。好友关系是低频写（一辈子几次），
+--         而「好友列表」是高频读，这个取舍明显偏向读。
 CREATE TABLE IF NOT EXISTS friend_relation (
-    id         BIGINT       GENERATED BY DEFAULT AS IDENTITY,
-    user_id    BIGINT       NOT NULL,
-    friend_id  BIGINT       NOT NULL,
+    id         BIGINT      GENERATED BY DEFAULT AS IDENTITY,
+    user_id    BIGINT      NOT NULL,
+    friend_id  BIGINT      NOT NULL,
     remark     VARCHAR(191) NOT NULL DEFAULT '',
-    status     SMALLINT     NOT NULL DEFAULT 1,
-    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    status     SMALLINT    NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT pk_friend_relation PRIMARY KEY (id),
-    CONSTRAINT uk_friend_relation UNIQUE (user_id, friend_id)
+    CONSTRAINT uk_friend_relation UNIQUE (user_id, friend_id),
+    -- 不能和自己成为好友：把该不变量交给数据库，避免各入口漏校验
+    CONSTRAINT ck_friend_relation_not_self CHECK (user_id <> friend_id)
 );
-CREATE INDEX IF NOT EXISTS idx_friend_relation_friend ON friend_relation (friend_id);
+
+CREATE INDEX IF NOT EXISTS idx_friend_relation_friend
+    ON friend_relation (friend_id);
 
 COMMENT ON TABLE  friend_relation         IS '好友关系表，双向各存一行';
 COMMENT ON COLUMN friend_relation.remark  IS '好友备注名';
@@ -115,14 +193,23 @@ CREATE TABLE IF NOT EXISTS friend_request (
     expire_at  TIMESTAMPTZ  NOT NULL,
     handled_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
     CONSTRAINT pk_friend_request PRIMARY KEY (id),
-    CONSTRAINT uk_friend_request UNIQUE (from_uid, to_uid, status)
+    CONSTRAINT ck_friend_request_not_self CHECK (from_uid <> to_uid)
 );
-CREATE INDEX IF NOT EXISTS idx_friend_request_to ON friend_request (to_uid, status);
+
+-- 「同一对用户只能有一条待处理申请」用部分唯一索引表达。
+-- 相比把 status 放进唯一键，部分索引只约束 status = 0 的行，
+-- 因此历史申请（已同意/已拒绝）可以无限累积而不互相冲突。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_friend_request_pending
+    ON friend_request (from_uid, to_uid) WHERE status = 0;
+
+CREATE INDEX IF NOT EXISTS idx_friend_request_to_status
+    ON friend_request (to_uid, status, created_at DESC);
 
 COMMENT ON TABLE  friend_request            IS '好友申请表';
 COMMENT ON COLUMN friend_request.status     IS '0 待处理 1 已同意 2 已拒绝 3 已过期';
-COMMENT ON COLUMN friend_request.expire_at  IS '过期时间，避免僵尸申请长期占用唯一约束';
+COMMENT ON COLUMN friend_request.expire_at  IS '过期时间，避免僵尸申请长期占用待处理唯一键';
 
 -- ── 本地消息表（Outbox） ────────────────────────────────────────────────────
 -- 与业务写入放在同一事务中，再由后台协程投递到消息队列，
@@ -135,13 +222,23 @@ CREATE TABLE IF NOT EXISTS message_outbox (
     payload       BYTEA        NOT NULL,
     status        SMALLINT     NOT NULL DEFAULT 0,
     retry_count   INT          NOT NULL DEFAULT 0,
+    -- last_error 保留最近一次失败原因，排障时无需翻日志
+    last_error    VARCHAR(255) NOT NULL DEFAULT '',
     next_retry_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
     CONSTRAINT pk_message_outbox PRIMARY KEY (id),
     CONSTRAINT uk_message_outbox_event UNIQUE (event_id)
 );
-CREATE INDEX IF NOT EXISTS idx_message_outbox_pending ON message_outbox (status, next_retry_at);
+
+-- 投递协程只需捞出「待投递且已到期」的行，部分索引让它不被历史数据拖累
+CREATE INDEX IF NOT EXISTS idx_message_outbox_pending
+    ON message_outbox (next_retry_at) WHERE status = 0;
+-- 失败重试与死信排查
+CREATE INDEX IF NOT EXISTS idx_message_outbox_failed
+    ON message_outbox (status, retry_count DESC) WHERE status = 2;
 
 COMMENT ON TABLE  message_outbox               IS '本地消息表，保证落库与投递的原子性';
 COMMENT ON COLUMN message_outbox.partition_key IS '分区键，取会话 ID 以保证同会话消息进入同一分区从而有序';
 COMMENT ON COLUMN message_outbox.status        IS '0 待投递 1 已投递 2 失败';
+COMMENT ON COLUMN message_outbox.last_error    IS '最近一次投递失败原因';

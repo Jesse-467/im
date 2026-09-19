@@ -2,7 +2,6 @@ package biz
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"time"
 
@@ -74,20 +73,11 @@ func (uc *GroupUseCase) CreateGroup(ctx context.Context, ownerID int64, name str
 		return nil, 0, err
 	}
 
-	conv := &Conversation{
-		ID:        id,
-		Type:      ConversationTypeGroup,
-		BizKey:    GroupBizKey(id),
-		Name:      name,
-		Status:    ConversationStatusNormal,
-		OwnerID:   ownerID,
-		CreatedAt: time.Now(),
-	}
-
+	// 先确定成员再去重，这样 member_count 可以在插入时一次写对，
+	// 避免"先建会话、再回写人数"这一步在并发下产生不一致。
 	members := []*ConversationMember{
 		{UserID: ownerID, Role: MemberRoleOwner},
 	}
-	// 去重并排除创建者本人
 	seen := map[int64]struct{}{ownerID: {}}
 	for _, uid := range memberIDs {
 		if uid <= 0 {
@@ -103,17 +93,23 @@ func (uc *GroupUseCase) CreateGroup(ctx context.Context, ownerID int64, name str
 		return nil, 0, ErrInvalidParam
 	}
 
+	conv := &Conversation{
+		ID:          id,
+		Type:        ConversationTypeGroup,
+		BizKey:      GroupBizKey(id),
+		Name:        name,
+		Status:      ConversationStatusNormal,
+		OwnerID:     ownerID,
+		MemberCount: int32(len(members)),
+		CreatedAt:   time.Now(),
+	}
+
 	if err := uc.convRepo.Create(ctx, conv, members); err != nil {
 		return nil, 0, err
 	}
 
 	uc.log.Infow("msg", "群聊已创建", "conversationId", conv.ID, "owner", ownerID, "members", len(members))
 	return conv, len(members) - 1, nil
-}
-
-// GroupBizKey 生成群聊的业务去重键。
-func GroupBizKey(conversationID int64) string {
-	return "g_" + strconv.FormatInt(conversationID, 10)
 }
 
 // AddMembers 向群聊添加成员。

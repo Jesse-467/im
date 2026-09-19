@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -89,9 +90,10 @@ func (r *conversationRepo) ListByUser(ctx context.Context, userID int64) ([]*biz
 	err := r.data.db.WithContext(ctx).
 		Table("conversation AS c").
 		Select("c.id, c.type, c.biz_key, c.name, c.avatar_url, c.status, c.owner_id, c.max_seq, c.created_at, "+
-			"m.alias_name, m.role, m.last_read_seq, m.joined_at").
+			"m.alias_name, m.role, m.last_read_seq, m.unread_count, m.joined_at").
 		Joins("JOIN conversation_member AS m ON m.conversation_id = c.id").
-		Where("m.user_id = ?", userID).
+		// 已离开的成员仍保留成员行（用于历史追溯），但不应再出现在会话列表里
+		Where("m.user_id = ? AND m.left_at IS NULL", userID).
 		// updated_at 代表会话最近活跃时间：新消息推进 max_seq 时会一并刷新它
 		Order("c.updated_at DESC").
 		Scan(&rows).Error
@@ -178,22 +180,45 @@ func (r *conversationRepo) AddMembers(ctx context.Context, conversationID int64,
 	}
 
 	res := r.data.db.WithContext(ctx).
-		Clauses(clause.OnConflict{DoNothing: true}).
+		Clauses(clause.OnConflict{
+			// 重新入群时复用原有成员行：把 left_at 清空表示「又在场了」。
+			// 若只做 DoNothing，退过群的人再次入群会因唯一约束而加不进来，
+			// 表现为「拉人成功但对方看不到群」这类难查的问题。
+			Columns:   []clause.Column{{Name: "conversation_id"}, {Name: "user_id"}},
+			DoUpdates: clause.Assignments(map[string]any{"left_at": nil}),
+		}).
 		Create(&rows)
 	if res.Error != nil {
 		return 0, fmt.Errorf("data: 批量加入会话成员失败: %w", res.Error)
+	}
+	// 新增成员后同步推进会话上的冗余计数。
+	//
+	// 用表达式自增而非「先读再写」：并发拉人时后者会丢更新。
+	// 计数只增不减（成员是软删除，行仍在），因此这里不做减法。
+	if res.RowsAffected > 0 {
+		if err := r.data.db.WithContext(ctx).
+			Model(&conversationModel{}).
+			Where("id = ?", conversationID).
+			Update("member_count", gorm.Expr("member_count + ?", res.RowsAffected)).Error; err != nil {
+			return 0, fmt.Errorf("data: 更新会话成员数失败: %w", err)
+		}
 	}
 	return int(res.RowsAffected), nil
 }
 
 // RemoveMember 把成员移出会话。
 //
-// 成员不存在时也返回成功：调用方（退群、移出群成员）的目标是「移除后不存在」，
-// 重复调用应当幂等，而不是因为别人已经移除而报错。
+// 采用软删除（置 left_at）而非物理删除：
+//   - 保留「谁什么时候退的群」这一事实，便于追溯与合规；
+//   - 重新入群可直接复用同一行，不会因唯一约束冲突而失败；
+//   - 历史消息的发送者引用不会变成悬空。
+//
+// 重复调用天然幂等：条件里限定 left_at IS NULL，已离开的行不会被再次更新。
 func (r *conversationRepo) RemoveMember(ctx context.Context, conversationID, userID int64) error {
 	err := r.data.db.WithContext(ctx).
-		Where("conversation_id = ? AND user_id = ?", conversationID, userID).
-		Delete(&conversationMemberModel{}).Error
+		Model(&conversationMemberModel{}).
+		Where("conversation_id = ? AND user_id = ? AND left_at IS NULL", conversationID, userID).
+		Updates(map[string]any{"left_at": time.Now(), "unread_count": 0}).Error
 	if err != nil {
 		return fmt.Errorf("data: 移除会话成员失败: %w", err)
 	}
@@ -202,12 +227,13 @@ func (r *conversationRepo) RemoveMember(ctx context.Context, conversationID, use
 
 // FindMember 查询单个成员。
 //
-// 成员不存在返回 (nil, nil) 而非错误：biz 层用 nil 表达「不是成员」这一正常业务分支
+// 已离开的成员视为不存在：权限校验依赖本方法，退群后必须立即失去访问权。
+// 成员不存在返回 (nil, nil) 而非错误——biz 层用 nil 表达「不是成员」这一正常业务分支
 // （例如非成员访问会话应得到 403 而不是 500），若返回错误反而会被当成系统故障。
 func (r *conversationRepo) FindMember(ctx context.Context, conversationID, userID int64) (*biz.ConversationMember, error) {
 	var m conversationMemberModel
 	err := r.data.db.WithContext(ctx).
-		Where("conversation_id = ? AND user_id = ?", conversationID, userID).
+		Where("conversation_id = ? AND user_id = ? AND left_at IS NULL", conversationID, userID).
 		First(&m).Error
 	if err != nil {
 		if isRecordNotFound(err) {
@@ -218,14 +244,14 @@ func (r *conversationRepo) FindMember(ctx context.Context, conversationID, userI
 	return toBizMember(&m), nil
 }
 
-// ListMembers 返回会话的全部成员。
+// ListMembers 返回会话当前在场的成员。
 //
 // 角色倒序让群主、管理员排在前面，再按加入时间正序：展示时「谁建的群」一眼可见，
 // 同时保证同一群每次返回的顺序稳定（仅按 role 排序时同角色成员顺序不确定）。
 func (r *conversationRepo) ListMembers(ctx context.Context, conversationID int64) ([]*biz.ConversationMember, error) {
 	var rows []conversationMemberModel
 	err := r.data.db.WithContext(ctx).
-		Where("conversation_id = ?", conversationID).
+		Where("conversation_id = ? AND left_at IS NULL", conversationID).
 		Order("role DESC, joined_at ASC").
 		Find(&rows).Error
 	if err != nil {
@@ -239,16 +265,23 @@ func (r *conversationRepo) ListMembers(ctx context.Context, conversationID int64
 	return members, nil
 }
 
-// UpdateMemberReadSeq 推进成员的已读位点。
+// UpdateMemberReadSeq 推进成员的已读位点，并同步扣减未读数。
 //
 // 条件里带 last_read_seq < ? 而不是直接赋值：客户端可能乱序上报已读，
 // 若无条件覆盖，一个迟到的旧位点会把已经推进的位点回退，已读消息重新变成未读。
 // 把比较放进 WHERE 后，回退请求只会影响 0 行，天然被忽略。
+//
+// 未读数这里按「位点推进了多少条」同比例扣减，而不是直接置零：
+// 客户端上报的位点可能落后于最新消息，此时仍有未读，置零会丢红点。
 func (r *conversationRepo) UpdateMemberReadSeq(ctx context.Context, conversationID, userID, seq int64) error {
 	err := r.data.db.WithContext(ctx).
 		Model(&conversationMemberModel{}).
 		Where("conversation_id = ? AND user_id = ? AND last_read_seq < ?", conversationID, userID, seq).
-		Update("last_read_seq", seq).Error
+		Updates(map[string]any{
+			"last_read_seq": seq,
+			// GREATEST(...,0) 兜底，避免并发下出现负数未读
+			"unread_count": gorm.Expr("GREATEST(unread_count - (? - last_read_seq), 0)", seq),
+		}).Error
 	if err != nil {
 		return fmt.Errorf("data: 更新已读位点失败: %w", err)
 	}

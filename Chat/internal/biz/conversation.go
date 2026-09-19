@@ -46,9 +46,11 @@ type Conversation struct {
 	Status    int32
 	// OwnerID 仅群聊有意义，单聊为 0
 	OwnerID int64
-	// MaxSeq 是会话内最新序号，用于未读数计算与客户端对齐
-	MaxSeq    int64
-	CreatedAt time.Time
+	// MaxSeq 是会话内序号的高水位，用于客户端对齐与服务端补洞
+	MaxSeq int64
+	// MemberCount 是冗余的成员数，避免每次统计
+	MemberCount int32
+	CreatedAt   time.Time
 }
 
 // ConversationMember 是会话成员，承载成员维度上的状态。
@@ -58,9 +60,18 @@ type ConversationMember struct {
 	// AliasName 是用户对该会话的自定义备注名：单聊为对好友的备注，群聊为我在群里的昵称
 	AliasName string
 	Role      int32
-	// LastReadSeq 是已读位点，未读数 = 会话 MaxSeq - LastReadSeq
+	// LastReadSeq 是已读位点，只表达「读到哪了」这一事实
 	LastReadSeq int64
+	// UnreadCount 是独立维护的未读计数。
+	//
+	// 刻意不用 MaxSeq - LastReadSeq 推导：该差值在退群后重新入群（位点归零）、
+	// 消息撤回、消息删除等场景下都不等于真实未读数，而且会让一个高频展示字段
+	// 依赖两处数据的实时一致性。
+	UnreadCount int64
 	JoinedAt    time.Time
+	// LeftAt 非空表示已离开该会话。成员行刻意保留而不删除，
+	// 以便「谁什么时候退的群」可追溯，也让重新入群能复用同一行。
+	LeftAt *time.Time
 }
 
 // UserConversation 聚合"某个用户参与的会话"这一关系。
@@ -82,15 +93,35 @@ type ConversationItem struct {
 	LastReadSeq int64
 }
 
+// 会话业务去重键的前缀。
+//
+// 为什么带前缀：单聊键与群聊键共用一个唯一索引（type, biz_key），
+// 前缀让两种键在肉眼与日志中即可区分；同时避免极端情况下
+// 「某个用户 ID 拼出的串」恰好等于另一个群聊键的形态。
+const (
+	singleBizKeyPrefix = "S:"
+	groupBizKeyPrefix  = "G:"
+)
+
 // SingleBizKey 生成单聊会话的业务键。
 //
-// 刻意对两个用户 ID 排序后拼接：无论谁发起，A 与 B 之间都命中同一个键，
-// 由数据库唯一约束兜底"一对用户一个会话"，即使双方并发发起也不会产生两个会话。
+// 关键不变量：无论谁发起，A 与 B 之间必须得到同一个键。
+// 这里对两个用户 ID 做数值比较后排序，而不是拼完再比较字符串——
+// 字符串比较下 "1000" < "999"（逐字符比 '1' < '9'），
+// 会让 (1000, 999) 与 (999, 1000) 产生两个不同的键，
+// 进而突破唯一索引、出现两个单聊会话。
+//
+// 该不变量由 TestSingleBizKeySymmetric 用属性测试守护。
 func SingleBizKey(uidA, uidB int64) string {
 	if uidA > uidB {
 		uidA, uidB = uidB, uidA
 	}
-	return fmt.Sprintf("%d_%d", uidA, uidB)
+	return fmt.Sprintf("%s%d:%d", singleBizKeyPrefix, uidA, uidB)
+}
+
+// GroupBizKey 生成群聊会话的业务键。
+func GroupBizKey(conversationID int64) string {
+	return groupBizKeyPrefix + strconv.FormatInt(conversationID, 10)
 }
 
 // ConversationRepo 是会话仓储。
@@ -209,9 +240,8 @@ func (uc *ConversationUseCase) ListConversations(ctx context.Context, userID int
 			Conversation: rel.Conversation,
 			LastMessage:  lastMsgs[rel.Conversation.ID],
 			LastReadSeq:  rel.Member.LastReadSeq,
-		}
-		if unread := rel.Conversation.MaxSeq - rel.Member.LastReadSeq; unread > 0 {
-			item.UnreadCount = unread
+			// 直接取成员行上维护的计数，而不是用 MaxSeq - LastReadSeq 推导
+			UnreadCount: rel.Member.UnreadCount,
 		}
 		item.DisplayName, item.DisplayAvatar = resolveDisplay(rel, peerOf[rel.Conversation.ID], briefs)
 		items = append(items, item)
@@ -279,6 +309,8 @@ func (uc *ConversationUseCase) EnsureSingleConversation(ctx context.Context, uid
 		Type:   ConversationTypeSingle,
 		BizKey: bizKey,
 		Status: ConversationStatusNormal,
+		// 单聊恒为两名成员，直接写死避免一次多余的统计
+		MemberCount: 2,
 	}
 	members := []*ConversationMember{
 		{UserID: uidA, Role: MemberRoleMember},

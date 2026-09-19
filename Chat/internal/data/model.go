@@ -78,14 +78,15 @@ func derefString(s *string) string {
 type conversationModel struct {
 	// autoIncrement:false 是必须的：该列是雪花 ID，由应用在写入前生成，
 	// 若让 GORM 误判为自增，插入语句会省略 id 并依赖 RETURNING，落库必然失败。
-	ID        int64  `gorm:"column:id;primaryKey;autoIncrement:false"`
-	Type      int32  `gorm:"column:type;not null"`
-	BizKey    string `gorm:"column:biz_key;size:191;not null"`
-	Name      string `gorm:"column:name;size:191;not null;default:''"`
-	AvatarURL string `gorm:"column:avatar_url;size:512;not null;default:''"`
-	Status    int32  `gorm:"column:status;not null;default:1"`
-	OwnerID   int64  `gorm:"column:owner_id;not null;default:0"`
-	MaxSeq    int64  `gorm:"column:max_seq;not null;default:0"`
+	ID          int64  `gorm:"column:id;primaryKey;autoIncrement:false"`
+	Type        int32  `gorm:"column:type;not null"`
+	BizKey      string `gorm:"column:biz_key;size:191;not null"`
+	Name        string `gorm:"column:name;size:191;not null;default:''"`
+	AvatarURL   string `gorm:"column:avatar_url;size:512;not null;default:''"`
+	Status      int32  `gorm:"column:status;not null;default:1"`
+	OwnerID     int64  `gorm:"column:owner_id;not null;default:0"`
+	MaxSeq      int64  `gorm:"column:max_seq;not null;default:0"`
+	MemberCount int32  `gorm:"column:member_count;not null;default:0"`
 	// Extra 是会话维度的扩展 JSON，当前业务尚未使用，保留以对齐表结构。
 	Extra     *string   `gorm:"column:extra;type:jsonb"`
 	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
@@ -115,36 +116,39 @@ type userConversationRow struct {
 	AliasName   string    `gorm:"column:alias_name"`
 	Role        int32     `gorm:"column:role"`
 	LastReadSeq int64     `gorm:"column:last_read_seq"`
+	UnreadCount int64     `gorm:"column:unread_count"`
 	JoinedAt    time.Time `gorm:"column:joined_at"`
 }
 
 // toBizConversation 把存储模型转换为业务实体。
 func toBizConversation(m *conversationModel) *biz.Conversation {
 	return &biz.Conversation{
-		ID:        m.ID,
-		Type:      m.Type,
-		BizKey:    m.BizKey,
-		Name:      m.Name,
-		AvatarURL: m.AvatarURL,
-		Status:    m.Status,
-		OwnerID:   m.OwnerID,
-		MaxSeq:    m.MaxSeq,
-		CreatedAt: m.CreatedAt,
+		ID:          m.ID,
+		Type:        m.Type,
+		BizKey:      m.BizKey,
+		Name:        m.Name,
+		AvatarURL:   m.AvatarURL,
+		Status:      m.Status,
+		OwnerID:     m.OwnerID,
+		MaxSeq:      m.MaxSeq,
+		MemberCount: m.MemberCount,
+		CreatedAt:   m.CreatedAt,
 	}
 }
 
 // fromBizConversation 把业务实体转换为存储模型。
 func fromBizConversation(c *biz.Conversation) *conversationModel {
 	return &conversationModel{
-		ID:        c.ID,
-		Type:      c.Type,
-		BizKey:    c.BizKey,
-		Name:      c.Name,
-		AvatarURL: c.AvatarURL,
-		Status:    c.Status,
-		OwnerID:   c.OwnerID,
-		MaxSeq:    c.MaxSeq,
-		CreatedAt: c.CreatedAt,
+		ID:          c.ID,
+		Type:        c.Type,
+		BizKey:      c.BizKey,
+		Name:        c.Name,
+		AvatarURL:   c.AvatarURL,
+		Status:      c.Status,
+		OwnerID:     c.OwnerID,
+		MaxSeq:      c.MaxSeq,
+		MemberCount: c.MemberCount,
+		CreatedAt:   c.CreatedAt,
 	}
 }
 
@@ -158,9 +162,13 @@ type conversationMemberModel struct {
 	AliasName      string `gorm:"column:alias_name;size:191;not null;default:''"`
 	Role           int32  `gorm:"column:role;not null;default:0"`
 	LastReadSeq    int64  `gorm:"column:last_read_seq;not null;default:0"`
+	UnreadCount    int64  `gorm:"column:unread_count;not null;default:0"`
 	Mute           int32  `gorm:"column:mute;not null;default:0"`
+	Pinned         int32  `gorm:"column:pinned;not null;default:0"`
 	// joined_at 在插入时由 GORM 写入，群成员列表要按它排序。
 	JoinedAt time.Time `gorm:"column:joined_at;autoCreateTime"`
+	// left_at 用指针表达可空：nil 表示仍在会话中。
+	LeftAt *time.Time `gorm:"column:left_at"`
 }
 
 // TableName 显式指定表名。
@@ -174,7 +182,9 @@ func toBizMember(m *conversationMemberModel) *biz.ConversationMember {
 		AliasName:      m.AliasName,
 		Role:           m.Role,
 		LastReadSeq:    m.LastReadSeq,
+		UnreadCount:    m.UnreadCount,
 		JoinedAt:       m.JoinedAt,
+		LeftAt:         m.LeftAt,
 	}
 }
 
@@ -189,7 +199,9 @@ func fromBizMember(m *biz.ConversationMember) *conversationMemberModel {
 		AliasName:      m.AliasName,
 		Role:           m.Role,
 		LastReadSeq:    m.LastReadSeq,
+		UnreadCount:    m.UnreadCount,
 		JoinedAt:       m.JoinedAt,
+		LeftAt:         m.LeftAt,
 	}
 }
 
