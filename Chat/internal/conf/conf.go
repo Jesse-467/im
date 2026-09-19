@@ -185,7 +185,6 @@ type Log struct {
 // App 应用自身配置。
 type App struct {
 	HTTPAddr        string
-	GRPCAddr        string
 	JWTSecret       string
 	JWTAccessExpire time.Duration
 	// WSAddr 是 WebSocket 网关对外声明的地址。
@@ -230,12 +229,16 @@ func Load() (*Config, error) {
 		ServiceName: envString("ServiceName", "chat"),
 
 		DB: DB{
-			Type:            envString("DB_TYPE", "postgres"),
-			Host:            envString("DB_HOST", "127.0.0.1"),
+			Type: envString("DB_TYPE", "postgres"),
+			// Host / Name 刻意不给默认值：它们决定「连到哪个库」，
+			// 猜错会静默连到另一个数据库（本地开发尤其容易发生）。
+			// 缺省时由 Validate 明确报错，比带默认值安全得多。
+			// Port / User 有行业通用默认值，给了不会掩盖配置错误。
+			Host:            envString("DB_HOST", ""),
 			Port:            envInt("DB_PORT", 5432),
 			User:            envString("DB_USER", "postgres"),
 			Password:        envString("DB_PASSWORD", ""),
-			Name:            envString("DB_NAME", "im_chat"),
+			Name:            envString("DB_NAME", ""),
 			SSLMode:         envString("DB_SSL_MODE", "disable"),
 			DSN:             envString("DB_DSN", ""),
 			DebugSQL:        envBool("DB_DEBUG_SQL", false),
@@ -245,8 +248,10 @@ func Load() (*Config, error) {
 		},
 
 		Cache: Cache{
-			Type:       envString("CACHE_TYPE", "redis-standalone"),
-			Addrs:      envStringSlice("CACHE_ADDRS", []string{"127.0.0.1:6379"}),
+			Type: envString("CACHE_TYPE", "redis-standalone"),
+			// Addrs 同样不给默认值：缓存虽然可降级，但「悄悄连到默认地址」
+			// 会让降级告警永远不触发，运维也就无从发现有组件没配好。
+			Addrs:      envStringSlice("CACHE_ADDRS", nil),
 			Password:   envString("CACHE_PASSWORD", ""),
 			DB:         envInt("CACHE_DB", 0),
 			PoolSize:   envInt("CACHE_POOL_SIZE", 100),
@@ -287,13 +292,15 @@ func Load() (*Config, error) {
 		},
 
 		App: App{
-			HTTPAddr:           envString("HTTP_ADDR", "0.0.0.0:8002"),
-			GRPCAddr:           envString("GRPC_ADDR", "0.0.0.0:9002"),
-			JWTSecret:          envString("JWT_SECRET", ""),
-			JWTAccessExpire:    envDuration("JWT_ACCESS_EXPIRE", 86400*time.Second),
-			WSAddr:             envString("WS_ADDR", "127.0.0.1:8002"),
-			WSPath:             envString("WS_PATH", "/ws"),
-			AccountRPCEndpoint: envString("ACCOUNT_RPC_ENDPOINT", "127.0.0.1:9001"),
+			HTTPAddr:        envString("HTTP_ADDR", "0.0.0.0:8002"),
+			JWTSecret:       envString("JWT_SECRET", ""),
+			JWTAccessExpire: envDuration("JWT_ACCESS_EXPIRE", 86400*time.Second),
+			WSAddr:          envString("WS_ADDR", "127.0.0.1:8002"),
+			WSPath:          envString("WS_PATH", "/ws"),
+			// AccountRPCEndpoint 不给默认值：它是 Chat 的强依赖，
+			// 猜一个地址只会把「配置缺失」变成「运行期连不上」，
+			// 而后者要在第一次调用账号中心时才会暴露。
+			AccountRPCEndpoint: envString("ACCOUNT_RPC_ENDPOINT", ""),
 			NodeID:             int64(envInt("NODE_ID", 0)),
 		},
 	}
@@ -403,11 +410,11 @@ func (c *Config) Check() []Issue {
 		add(LevelWarn, "缓存未配置（CACHE_ADDRS 为空）：消息序号分配与在线路由不可用，"+
 			"发送消息将失败，实时推送与跨节点投递不可用")
 	}
-	if c.App.GRPCAddr == "" {
-		add(LevelWarn, "GRPC_ADDR 为空：Chat 暂未对外提供 gRPC 服务，仅影响服务发现注册")
-	}
-	if c.MQ.Type == "" {
-		add(LevelWarn, "MQ_TYPE 为空：按 %q 处理，生产环境必须显式配置为 kafka", TypeLogFallback)
+	// 非生产环境允许 log 投递（不依赖中间件），但要提醒它不是生产配置。
+	// 生产环境使用 log 会在 mq.NewPublisher 里被直接拒绝，因此这里不重复拦截。
+	if !c.IsProd() && strings.EqualFold(c.MQ.Type, TypeLogFallback) {
+		add(LevelWarn, "MQ_TYPE=%s 只适用于本地开发与测试：消息不经过真实队列，"+
+			"投递链路仅在本进程内闭环", c.MQ.Type)
 	}
 
 	return issues

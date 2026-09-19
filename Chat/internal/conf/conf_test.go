@@ -37,7 +37,6 @@ func validConfig() *Config {
 		},
 		App: App{
 			HTTPAddr:           "0.0.0.0:8002",
-			GRPCAddr:           "0.0.0.0:9002",
 			JWTSecret:          "dev_only_secret_please_change_in_production",
 			JWTAccessExpire:    24 * time.Hour,
 			AccountRPCEndpoint: "127.0.0.1:9001",
@@ -171,8 +170,7 @@ func TestOptionalComponentsOnlyWarn(t *testing.T) {
 		mutate func(*Config)
 	}{
 		{"无缓存地址", func(c *Config) { c.Cache.Addrs = nil }},
-		{"空 gRPC 地址", func(c *Config) { c.App.GRPCAddr = "" }},
-		{"空 MQ 类型", func(c *Config) { c.MQ.Type = "" }},
+		{"开发环境用 log 投递", func(c *Config) { c.MQ.Type = TypeLogFallback }},
 	}
 
 	for _, tc := range cases {
@@ -207,11 +205,10 @@ func TestCheckReportsAllIssuesAtOnce(t *testing.T) {
 	c.DB = DB{MaxOpenConns: 100}  // 缺数据库
 	c.Cache.Addrs = nil           // 缺缓存
 	c.App.AccountRPCEndpoint = "" // 缺账号中心
-	c.App.GRPCAddr = ""           // 缺 gRPC 地址
 
 	issues := c.Check()
-	if len(issues) < 4 {
-		t.Fatalf("应一次列出至少 4 个问题，实际 %d 个: %+v", len(issues), issues)
+	if len(issues) < 3 {
+		t.Fatalf("应一次列出至少 3 个问题，实际 %d 个: %+v", len(issues), issues)
 	}
 }
 
