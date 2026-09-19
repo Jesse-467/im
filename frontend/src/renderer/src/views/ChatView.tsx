@@ -29,9 +29,10 @@ export function ChatView({ onGoContacts }: { onGoContacts: () => void }): JSX.El
   }, [conversations, keyword])
 
   const activeConv = conversations.find((c) => c.conversationId === activeConvId)
+  const closeConversation = useChatStore((s) => s.closeConversation)
 
   return (
-    <div className="chat-layout">
+    <div className={`chat-layout ${activeConv ? 'has-active' : ''}`}>
       <motion.section
         className="panel conv-panel"
         initial={{ opacity: 0, x: -16 }}
@@ -90,7 +91,7 @@ export function ChatView({ onGoContacts }: { onGoContacts: () => void }): JSX.El
             exit={{ opacity: 0, x: -14, scale: 0.997 }}
             transition={{ type: 'spring', stiffness: 300, damping: 30 }}
           >
-            <ChatPanel conv={activeConv} />
+            <ChatPanel conv={activeConv} onBack={closeConversation} />
           </motion.section>
         ) : (
           <motion.section
@@ -185,7 +186,7 @@ function ConversationCard({
 }
 
 /** 聊天面板：头部（会话信息）+ 消息流 + 输入区 */
-function ChatPanel({ conv }: { conv: Conversation }): JSX.Element {
+function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void }): JSX.Element {
   const name = conv.aliasName || conv.name || `会话 ${conv.conversationId}`
   const messages = useChatStore((s) => s.messagesByConv[conv.conversationId]) ?? []
   const members = useChatStore((s) => s.membersByConv[conv.conversationId])
@@ -238,6 +239,11 @@ function ChatPanel({ conv }: { conv: Conversation }): JSX.Element {
   return (
     <div className="chat-inner">
       <header className="chat-header">
+        <button className="chat-back-btn" title="返回会话列表" onClick={onBack}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M15 18l-6-6 6-6" />
+          </svg>
+        </button>
         <div className="chat-header-info">
           <Avatar
             name={name}

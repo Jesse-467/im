@@ -115,6 +115,7 @@ interface ChatState {
   refresh: () => Promise<void>
   refreshSlow: () => Promise<void>
   openConversation: (conversationId: number) => Promise<void>
+  closeConversation: () => void
   syncActive: () => Promise<void>
   sendText: (conversationId: number, text: string) => Promise<void>
   recall: (conversationId: number, messageId: number) => Promise<void>
@@ -229,6 +230,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else {
       await get().syncActive()
     }
+  },
+
+  /** 关闭当前会话（移动端返回会话列表用） */
+  closeConversation: () => {
+    set({ activeConvId: null })
   },
 
   /** 增量补齐当前打开会话的新消息 */

@@ -1,9 +1,15 @@
 /**
  * 服务器地址配置。
  *
- * 纯模块（不依赖 React/zustand），渲染层任意位置都能同步读写；
- * 持久化在 localStorage。默认指向本地 docker-compose 起的后端端口：
- * account 8001 / chat 8002（见仓库根 .env.example）。
+ * 纯模块（不依赖 React/zustand），渲染层任意位置都能同步读写。
+ *
+ * 默认值优先级：
+ *   1. 构建期环境变量（VITE_ACCOUNT_BASE / VITE_CHAT_BASE / VITE_WS_BASE）
+ *      —— 部署到阿里云等公网环境时，构建前注入即可切换，本地调试无需配置；
+ *   2. 本地回环地址（仓库根 docker-compose 起的后端端口：account 8001 / chat 8002）。
+ *
+ * UI 设置页保存的地址持久化在 localStorage，优先级高于上述默认值；
+ * 「恢复默认」会清除该覆盖，重新跟随环境变量。
  */
 
 export interface ServerSettings {
@@ -12,10 +18,11 @@ export interface ServerSettings {
   wsBase: string
 }
 
+/** 构建期环境变量注入的默认值；未配置时回退本地回环地址 */
 export const DEFAULT_SERVER_SETTINGS: ServerSettings = {
-  accountBase: 'http://127.0.0.1:8001',
-  chatBase: 'http://127.0.0.1:8002',
-  wsBase: 'ws://127.0.0.1:8002/ws'
+  accountBase: import.meta.env.VITE_ACCOUNT_BASE || 'http://127.0.0.1:8001',
+  chatBase: import.meta.env.VITE_CHAT_BASE || 'http://127.0.0.1:8002',
+  wsBase: import.meta.env.VITE_WS_BASE || 'ws://127.0.0.1:8002/ws'
 }
 
 const KEY = 'im.settings.server'
@@ -48,4 +55,10 @@ export function saveServerSettings(next: ServerSettings): ServerSettings {
   }
   localStorage.setItem(KEY, JSON.stringify(normalized))
   return normalized
+}
+
+/** 清除 UI 层的手动覆盖，恢复跟随构建期环境变量 */
+export function resetServerSettings(): ServerSettings {
+  localStorage.removeItem(KEY)
+  return { ...DEFAULT_SERVER_SETTINGS }
 }

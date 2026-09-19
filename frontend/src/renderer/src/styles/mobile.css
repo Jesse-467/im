@@ -1,0 +1,149 @@
+/* ============================================================================
+   移动端（安卓 / 窄窗口）适配
+   断点 720px：功能条沉底为 tab bar，消息页单栏切换，桌面专属控件隐藏。
+   ========================================================================== */
+
+/* 返回按钮：仅移动端显示（桌面端会话列表与聊天面板并列可见） */
+.chat-back-btn {
+  display: none;
+  flex: none;
+  margin-left: -6px;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  place-items: center;
+  color: var(--text-2);
+  transition: background 0.15s;
+}
+
+.chat-back-btn:active {
+  background: var(--hover);
+}
+
+@media (max-width: 720px) {
+  /* ── 主框架：标题栏 + 内容 + 底部 tab ─────────────────────────────── */
+
+  .shell {
+    height: 100dvh;
+    grid-template-columns: 1fr;
+    grid-template-rows: 44px 1fr 68px;
+    grid-template-areas:
+      'titlebar'
+      'body'
+      'rail';
+  }
+
+  /* 安卓上无窗口拖拽；标题栏仅作品牌展示 */
+  .titlebar {
+    -webkit-app-region: no-drag;
+    padding: 0 14px;
+  }
+
+  .shell-body {
+    padding: 0 10px;
+  }
+
+  /* 功能条 → 底部 tab bar（保持悬浮卡片质感） */
+  .rail {
+    flex-direction: row;
+    align-items: center;
+    width: auto;
+    margin: 0 10px 10px;
+    padding: 6px 10px;
+    border-radius: 24px;
+  }
+
+  .rail-avatar {
+    margin: 0 6px 0 0;
+    padding: 2px;
+    border-radius: 14px;
+    transform: scale(0.82);
+    transform-origin: left center;
+  }
+
+  .rail-nav {
+    flex-direction: row;
+    flex: 1;
+    gap: 2px;
+    padding: 0;
+  }
+
+  .rail-item {
+    flex: 1;
+    padding: 7px 0 5px;
+    border-radius: 16px;
+  }
+
+  .rail-bottom {
+    margin: 0;
+    width: auto;
+    padding: 0;
+  }
+
+  .rail-badge {
+    top: 1px;
+    right: 14%;
+  }
+
+  .status-dock {
+    right: 14px;
+    bottom: 84px;
+  }
+
+  /* ── 消息页：会话列表与聊天面板单栏切换 ──────────────────────────── */
+
+  .chat-layout {
+    gap: 10px;
+  }
+
+  .chat-layout.has-active .conv-panel {
+    display: none;
+  }
+
+  .chat-layout:not(.has-active) .chat-panel {
+    display: none;
+  }
+
+  .conv-panel {
+    width: 100%;
+    flex: 1;
+  }
+
+  .chat-back-btn {
+    display: grid;
+  }
+
+  /* 键盘弹起时输入区贴底，避免被软键盘遮挡 */
+  .composer textarea {
+    max-height: 96px;
+  }
+
+  /* ── 联系人页：面板占满 ───────────────────────────────────────────── */
+
+  .contacts-panel {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  /* ── 设置页：卡片占满、纵向滚动 ──────────────────────────────────── */
+
+  .me-layout {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 100%;
+    align-content: start;
+    padding: 4px 0 16px;
+  }
+
+  /* 关闭应用是桌面专属操作（直连环境 close 为空实现） */
+  .me-row.danger-row {
+    display: none;
+  }
+
+  /* ── 登录页：卡片自适应宽度 ───────────────────────────────────────── */
+
+  .auth-card {
+    width: min(92vw, 372px);
+    padding: 26px 22px 18px;
+  }
+}

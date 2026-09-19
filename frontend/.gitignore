@@ -6,3 +6,7 @@ release/
 .DS_Store
 .env
 .env.*
+!.env.example
+
+# Capacitor 同步进安卓工程的 Web 产物（由 cap sync 生成）
+android/app/src/main/assets/public/

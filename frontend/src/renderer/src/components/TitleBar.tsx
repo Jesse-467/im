@@ -6,13 +6,16 @@ import { MinusIcon, SquareIcon, RestoreIcon, CloseIcon } from './icons'
  * 无边框窗口的自绘标题栏。
  * 整条可拖拽；窗口控制按钮为「非拖拽区」，Windows 布局（右侧）。
  * 标题栏悬浮在内容之上，与 QQ NT 一样让内容铺满全窗。
+ * 安卓 / 浏览器等直连环境（__direct）没有窗口概念，隐藏控制按钮。
  */
 export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false)
+  const direct = window.bridge.__direct === true
 
   useEffect(() => {
+    if (direct) return
     return window.bridge.window.onMaximizedChanged(setMaximized)
-  }, [])
+  }, [direct])
 
   return (
     <div className="titlebar">
@@ -20,6 +23,7 @@ export function TitleBar(): JSX.Element {
         <span className="titlebar-logo" />
         微语
       </div>
+      {!direct && (
       <div className="titlebar-controls">
         <button
           className="titlebar-btn"
@@ -43,6 +47,7 @@ export function TitleBar(): JSX.Element {
           <CloseIcon width={13} height={13} />
         </button>
       </div>
+      )}
     </div>
   )
 }

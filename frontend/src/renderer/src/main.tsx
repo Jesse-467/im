@@ -9,6 +9,7 @@ import './styles/shell.css'
 import './styles/chat.css'
 import './styles/contacts.css'
 import './styles/me.css'
+import './styles/mobile.css'
 
 installBridgeFallback()
 

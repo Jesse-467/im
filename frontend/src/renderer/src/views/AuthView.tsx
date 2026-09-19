@@ -6,7 +6,7 @@ import { toast } from '@/store/toast'
 import { Avatar } from '@/components/Avatar'
 import { MailIcon, LockIcon, UserIcon, ServerIcon, SmileIcon } from '@/components/icons'
 import { isValidEmail } from '@/core/format'
-import { loadServerSettings, saveServerSettings, DEFAULT_SERVER_SETTINGS } from '@/core/settings'
+import { loadServerSettings, saveServerSettings, resetServerSettings, DEFAULT_SERVER_SETTINGS } from '@/core/settings'
 import { Modal } from '@/components/Modal'
 
 type AuthTab = 'login' | 'register'
@@ -242,9 +242,18 @@ export function ServerSettingsModal({
     onClose()
   }
 
+  /** 清除手动覆盖，恢复跟随构建时的环境变量默认值 */
+  const reset = (): void => {
+    const restored = resetServerSettings()
+    setSettings(restored)
+    toast('已恢复默认地址（跟随构建配置）', 'success')
+  }
+
   return (
     <Modal open={open} title="服务器设置" onClose={onClose}>
-      <p className="modal-tip">默认指向本地部署的后端（Account :8001 / Chat :8002）</p>
+      <p className="modal-tip">
+        默认跟随构建配置（未配置时指向本地后端 Account :8001 / Chat :8002）
+      </p>
       <label className="stack-field">
         <span>Account 服务地址</span>
         <input
@@ -270,7 +279,7 @@ export function ServerSettingsModal({
         />
       </label>
       <div className="modal-actions">
-        <button className="ghost-btn" onClick={() => setSettings({ ...DEFAULT_SERVER_SETTINGS })}>
+        <button className="ghost-btn" onClick={reset}>
           恢复默认
         </button>
         <button className="primary-btn" onClick={save}>
