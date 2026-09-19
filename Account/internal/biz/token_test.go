@@ -33,14 +33,21 @@ func (r *memTokenRepo) Save(_ context.Context, token *AuthToken) error {
 	if r.failSave {
 		return errors.New("模拟落库失败")
 	}
-	// 模拟 (user_id, device_id) 冲突更新：同一设备只保留最新一条
-	for jti, existing := range r.byJTI {
-		if existing.UserID == token.UserID && existing.DeviceID == token.DeviceID {
-			delete(r.byJTI, jti)
-		}
-	}
 	cp := *token
 	r.byJTI[token.JTI] = &cp
+	return nil
+}
+
+// CleanupDevice 与真实实现一致：删除同设备的历史行（保留本次 jti）。
+func (r *memTokenRepo) CleanupDevice(_ context.Context, userID int64, deviceID, jti string) error {
+	if deviceID == "" {
+		return nil
+	}
+	for k, t := range r.byJTI {
+		if t.UserID == userID && t.DeviceID == deviceID && k != jti {
+			delete(r.byJTI, k)
+		}
+	}
 	return nil
 }
 

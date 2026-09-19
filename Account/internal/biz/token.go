@@ -68,12 +68,18 @@ func (t *AuthToken) IsValid(now time.Time) bool {
 
 // TokenRepo 是令牌仓储接口，由 data 层实现。
 type TokenRepo interface {
-	// Save 写入或更新一条令牌记录。
+	// Save 写入一条令牌记录。
 	//
-	// 按 (user_id, device_id) 冲突更新：同一设备重新登录时复用同一行，
-	// 否则同一台设备反复登录会把自己的在线位占满。
-	// 返回值是落库后的记录（含自增 ID）。
+	// 按 jti 冲突更新：jti 是加密随机值，每次都不同，因此正常情况下
+	// 永远走插入分支。设备维度的去重由 CleanupDevice 在写入前完成。
 	Save(ctx context.Context, token *AuthToken) error
+
+	// CleanupDevice 删除同一设备在该用户下的历史令牌行。
+	//
+	// 供「同一设备重新登录」使用：先清掉旧行，再写入新令牌，
+	// 从而保证一个 device_id 只对应一条有效记录，设备数上限不被
+	// 自己的历史登录占满。
+	CleanupDevice(ctx context.Context, userID int64, deviceID, jti string) error
 
 	// FindByJTI 按 jti 查询令牌，不存在时返回 (nil, nil)。
 	//
@@ -195,6 +201,16 @@ func (uc *SessionUseCase) RegisterDevice(ctx context.Context, token *AuthToken) 
 		return nil, ErrInvalidParam
 	}
 	deviceKey := DeviceKey(token.DeviceID, token.JTI)
+
+	// 先清理同一设备的历史令牌行，再写入新令牌。
+	// 顺序不可颠倒：若先写入，同一 device_id 会短暂出现两行，
+	// 此时按设备反查（踢人路径）会命中不明确的多条记录。
+	if err := uc.tokens.CleanupDevice(ctx, token.UserID, token.DeviceID, token.JTI); err != nil {
+		// 清理失败不阻断登录：最坏情况是该设备的历史令牌残留，
+		// 导致设备数上限被自己的旧记录占满，由后续淘汰或过期收敛。
+		uc.log.Errorw("msg", "清理设备历史令牌失败",
+			"uid", token.UserID, "deviceKey", deviceKey, "err", err)
+	}
 
 	if err := uc.tokens.Save(ctx, token); err != nil {
 		uc.log.Errorw("msg", "持久化令牌失败",

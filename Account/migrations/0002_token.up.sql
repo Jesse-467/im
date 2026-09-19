@@ -39,9 +39,19 @@ CREATE TABLE IF NOT EXISTS account_token (
     CONSTRAINT uk_account_token_jti UNIQUE (jti)
 );
 
--- 按 (user_id, device_id) 唯一：同一用户同一设备只保留一条有效记录。
--- 没有它的话，同一台设备每次登录都会新增一行，设备数上限很快被自己占满。
-CREATE UNIQUE INDEX IF NOT EXISTS uk_account_token_device
+-- 按 (user_id, device_id) 建**普通**索引，用于「按设备反查令牌」（踢人路径）。
+--
+-- 刻意不是唯一索引，原因在 PostgreSQL 的 upsert 规则：
+--   部分唯一索引 (...) WHERE device_id <> '' 无法作为 ON CONFLICT 的仲裁索引，
+--   除非语句里重复同样的 WHERE 谓词（否则报 SQLSTATE 42P10）。而 GORM 的
+--   clause.OnConflict 无法生成该谓词。若改成不带谓词的全局唯一索引，
+--   客户端未上报 device_id（空串）时每次登录都会撞同一行、覆盖 jti，
+--   导致库与 Redis 有序集合错位。
+--
+-- 因此「同一设备只保留一行」改由应用层保证：
+-- account_token 的写入路径会先按 device_id 删除历史行（CleanupDevice），
+-- 再插入新令牌。这里只需一个普通索引来加速该反查与删除。
+CREATE INDEX IF NOT EXISTS idx_account_token_device
     ON account_token (user_id, device_id);
 
 -- 查询某用户的全部有效令牌（踢人时需要、审计时也需要）

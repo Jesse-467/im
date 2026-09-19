@@ -37,10 +37,16 @@ func NewLogPublisher(logger klog.Logger) *LogPublisher {
 // 日志模式没有真实队列，因此由发布者直接把消息交给处理器，
 // 使两种模式对上层行为一致：无论走不走真实队列，
 // 最终都由同一个消费者完成「查成员 → 推送给在线连接」。
+//
+// 记录一条 Info 日志，便于确认注册确实发生：一旦注册遗漏，
+// 投递侧仍会正常打印「投递消息（日志模式）」，但推送链路是静默断开的
+// （客户端表现为「消息发出去了，对方却收不到实时推送」），
+// 这类故障没有这条日志会非常难定位。
 func (p *LogPublisher) RegisterHandler(h Handler) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.handler = h
+	p.log.Infow("msg", "本地分发处理器已注册", "registered", h != nil)
 }
 
 // Publish 打印消息内容，并在注册了处理器时同步分发。

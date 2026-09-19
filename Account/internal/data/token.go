@@ -42,15 +42,24 @@ type tokenRepo struct{ data *Data }
 // NewTokenRepo 构造令牌仓储。
 func NewTokenRepo(d *Data) biz.TokenRepo { return &tokenRepo{data: d} }
 
-// Save 写入或更新一条令牌记录。
+// Save 写入一条令牌记录。
 //
-// 用 ON CONFLICT (user_id, device_id) DO UPDATE 而不是先查后写：
-//   - 同一设备重新登录时复用同一行，因此设备数上限不会被自己的重复登录占满；
-//   - 先查后写在并发下会同时判定「不存在」而双双插入，撞唯一约束报错，
-//     而 DO UPDATE 无需重试即可安全并发。
+// 用 ON CONFLICT (jti) DO UPDATE —— 冲突仲裁者恒为 jti，而不是
+// (user_id, device_id)。这里有个 PostgreSQL 的硬约束值得记下来：
 //
-// 冲突时会把 revoked_at 清空：那台设备重新登录成功，就代表它重新获得授权，
-// 旧行上残留的吊销标记必须一并清除，否则新令牌刚签发就处于「已吊销」状态。
+//	部分唯一索引 (user_id, device_id) WHERE device_id <> ''
+//	不能作为 ON CONFLICT 的仲裁索引，除非语句里重复同样的 WHERE 谓词
+//	（否则报 SQLSTATE 42P10: no unique or exclusion constraint matching
+//	the ON CONFLICT specification）。而 GORM 的 clause.OnConflict 无法
+//	生成部分索引的谓词，因此该索引不能用于 upsert。
+//
+// 用 jti 作仲裁者是安全的：jti 由加密随机数生成，每次登录必然不同，
+// 所以正常情况下永远走 INSERT 分支；DO UPDATE 只用于同一个 jti 被重复
+// 保存这一种情形（重试、并发），此时覆盖为最新状态即可。
+//
+// 「同一设备复用同一行」的语义由调用方保证：RegisterDevice 在 Save 之前
+// 会先按 deviceKey 清理掉该设备的历史行（见 CleanupDevice），
+// 从而同时满足「设备去重」与「upsert 必须用全局唯一索引」这两个约束。
 func (r *tokenRepo) Save(ctx context.Context, token *biz.AuthToken) error {
 	m := &tokenModel{
 		UserID:     token.UserID,
@@ -64,9 +73,8 @@ func (r *tokenRepo) Save(ctx context.Context, token *biz.AuthToken) error {
 
 	err := r.data.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "user_id"}, {Name: "device_id"}},
+			Columns: []clause.Column{{Name: "jti"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"jti":          m.JTI,
 				"platform":     m.Platform,
 				"expire_at":    m.ExpireAt,
 				"revoked_at":   nil,
@@ -81,6 +89,34 @@ func (r *tokenRepo) Save(ctx context.Context, token *biz.AuthToken) error {
 	}
 
 	token.ID = m.ID
+	return nil
+}
+
+// CleanupDevice 删除该设备在此用户下的历史令牌行。
+//
+// 为什么需要它：同一设备重新登录时，若旧行仍留在表里，会出现
+//   - 同一 device_id 对应多条令牌，按设备反查时语义不明确；
+//   - 设备数上限被自己的历史登录占满。
+//
+// 删除而非「标记吊销」：这台设备已经用新令牌重新登录，旧令牌没有任何
+// 保留价值，而且保留会让按 deviceKey 反查时同时命中多条。
+// 需要审计「何时被顶下线」的场景由 revoked_* 列覆盖（踢人时会写）。
+func (r *tokenRepo) CleanupDevice(ctx context.Context, userID int64, deviceID, jti string) error {
+	q := r.data.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		// 排除本次即将写入的那一条（同 jti 时无需删）
+		Where("jti <> ?", jti)
+
+	if deviceID != "" {
+		q = q.Where("device_id = ?", deviceID)
+	} else {
+		// 未上报 deviceId：每次登录都是独立设备，不做清理
+		return nil
+	}
+
+	if err := q.Delete(&tokenModel{}).Error; err != nil {
+		return fmt.Errorf("data: 清理设备历史令牌失败: %w", err)
+	}
 	return nil
 }
 
