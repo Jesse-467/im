@@ -4,6 +4,7 @@ import { useAuthStore } from '@/store/auth'
 import { ApiError } from '@/api/client'
 import { toast } from '@/store/toast'
 import { Avatar } from '@/components/Avatar'
+import { TitleBar } from '@/components/TitleBar'
 import { MailIcon, LockIcon, UserIcon, ServerIcon, SmileIcon } from '@/components/icons'
 import { isValidEmail } from '@/core/format'
 import { loadServerSettings, saveServerSettings, resetServerSettings, DEFAULT_SERVER_SETTINGS } from '@/core/settings'
@@ -80,11 +81,15 @@ export function AuthView(): JSX.Element {
       exit={{ opacity: 0, y: -16, scale: 0.985 }}
       transition={{ duration: 0.28, ease: 'easeOut' }}
     >
-      <div className="auth-blob auth-blob-a" />
-      <div className="auth-blob auth-blob-b" />
+      <TitleBar />
 
-      <motion.div
-        className="auth-card"
+      <div className="auth-stage">
+        <div className="auth-blob auth-blob-a" />
+        <div className="auth-blob auth-blob-b" />
+        <div className="auth-blob auth-blob-c" />
+
+        <motion.div
+          className="auth-card"
         initial={{ opacity: 0, y: 26, scale: 0.97 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ type: 'spring', stiffness: 260, damping: 26, delay: 0.05 }}
@@ -219,7 +224,8 @@ export function AuthView(): JSX.Element {
             服务器设置
           </button>
         </footer>
-      </motion.div>
+        </motion.div>
+      </div>
 
       <ServerSettingsModal open={serverOpen} onClose={() => setServerOpen(false)} />
     </motion.div>

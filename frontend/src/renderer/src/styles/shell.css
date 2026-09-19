@@ -20,6 +20,8 @@
 .titlebar {
   grid-area: titlebar;
   flex: none;
+  /* 在登录页（非 shell 网格）独立使用时也保持可感知的高度 */
+  min-height: 40px;
   display: flex;
   align-items: center;
   justify-content: space-between;

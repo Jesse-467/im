@@ -251,6 +251,8 @@
   place-items: center;
   background: rgba(23, 32, 46, 0.32);
   backdrop-filter: blur(6px);
+  /* 登录页舞台是窗口拖拽区，弹层必须豁免，否则点不到按钮 */
+  -webkit-app-region: no-drag;
 }
 
 .modal-card {

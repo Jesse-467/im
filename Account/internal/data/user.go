@@ -31,7 +31,7 @@ type userModel struct {
 	Password  string    `gorm:"column:password;size:255;not null"`
 	Nickname  string    `gorm:"column:nickname;size:64;not null"`
 	Gender    int32     `gorm:"column:gender;not null;default:0"`
-	AvatarURL string    `gorm:"column:avatar_url;size:512;not null;default:''"`
+	AvatarURL string    `gorm:"column:avatar_url;type:text;not null;default:''"`
 	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime"`
 	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }

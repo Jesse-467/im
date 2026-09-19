@@ -51,6 +51,22 @@
   z-index: -1;
 }
 
+/* 编辑态：头像右下角的相机角标，点击选图换头像 */
+.me-avatar-cam {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--brand-grad);
+  box-shadow: 0 4px 12px rgba(0, 127, 251, 0.45);
+  z-index: 1;
+}
+
 .me-hero-text {
   flex: 1;
   min-width: 0;

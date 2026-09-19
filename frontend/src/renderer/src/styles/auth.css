@@ -5,10 +5,23 @@
 .auth-view {
   position: relative;
   height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 标题栏之下的舞台：居中放卡片；空白区域可拖拽移动窗口（卡片内豁免） */
+.auth-stage {
+  position: relative;
+  flex: 1;
   display: grid;
   place-items: center;
   overflow: hidden;
+  -webkit-app-region: drag;
 }
+
+/* ── 品牌光斑：三团色晕各自按不同节奏循环漂移 ─────────────────────────── */
 
 .auth-blob {
   position: absolute;
@@ -16,6 +29,7 @@
   filter: blur(70px);
   opacity: 0.5;
   pointer-events: none;
+  will-change: transform;
 }
 
 .auth-blob-a {
@@ -24,7 +38,7 @@
   left: -120px;
   top: -140px;
   background: radial-gradient(circle, #35c3ff, #0a7ffb);
-  animation: blobDrift 9s ease-in-out infinite alternate;
+  animation: blobDriftA 18s ease-in-out infinite;
 }
 
 .auth-blob-b {
@@ -33,21 +47,82 @@
   right: -100px;
   bottom: -160px;
   background: radial-gradient(circle, #8f6bff, #5b8cff);
-  animation: blobDrift 11s ease-in-out infinite alternate-reverse;
+  animation: blobDriftB 23s ease-in-out infinite;
 }
 
-@keyframes blobDrift {
-  from {
+/* 第三团小光斑：在卡片右上方缓慢掠过，增加层次 */
+.auth-blob-c {
+  width: 240px;
+  height: 240px;
+  right: 16%;
+  top: 12%;
+  background: radial-gradient(circle, #67e8f9, #7c66ff);
+  opacity: 0.32;
+  animation: blobDriftC 27s ease-in-out infinite;
+}
+
+@keyframes blobDriftA {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+  }
+  25% {
+    transform: translate3d(64px, 40px, 0) scale(1.14) rotate(12deg);
+  }
+  50% {
+    transform: translate3d(28px, 108px, 0) scale(0.92) rotate(8deg);
+  }
+  75% {
+    transform: translate3d(-44px, 52px, 0) scale(1.1) rotate(-10deg);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+  }
+}
+
+@keyframes blobDriftB {
+  0% {
     transform: translate3d(0, 0, 0) scale(1);
   }
-  to {
-    transform: translate3d(36px, 26px, 0) scale(1.08);
+  33% {
+    transform: translate3d(-72px, -48px, 0) scale(1.16);
+  }
+  66% {
+    transform: translate3d(-20px, -110px, 0) scale(0.9);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes blobDriftC {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: blur(70px) hue-rotate(0deg);
+  }
+  50% {
+    transform: translate3d(-120px, 150px, 0) scale(1.3);
+    filter: blur(70px) hue-rotate(40deg);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: blur(70px) hue-rotate(0deg);
+  }
+}
+
+/* 动效减弱偏好：光斑静止，保留静态渐变 */
+@media (prefers-reduced-motion: reduce) {
+  .auth-blob-a,
+  .auth-blob-b,
+  .auth-blob-c {
+    animation: none;
   }
 }
 
 .auth-card {
   position: relative;
   z-index: 1;
+  /* 舞台整体是拖拽区，卡片与其内部交互豁免 */
+  -webkit-app-region: no-drag;
   width: 372px;
   padding: 34px 34px 24px;
   border-radius: 22px;

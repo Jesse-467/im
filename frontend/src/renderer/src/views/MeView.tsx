@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useAuthStore } from '@/store/auth'
 import { useChatStore } from '@/store/chat'
@@ -7,7 +7,50 @@ import { toast } from '@/store/toast'
 import { Avatar } from '@/components/Avatar'
 import { ServerSettingsModal } from './AuthView'
 import { wsClient } from '@/core/ws'
-import { MailIcon, UserIcon, ServerIcon, RefreshIcon, LogoutIcon, ClockIcon } from '@/components/icons'
+import { MailIcon, UserIcon, ServerIcon, RefreshIcon, LogoutIcon, ClockIcon, CameraIcon } from '@/components/icons'
+
+/** 头像边长（px）：144 已足够列表与聊天页展示，控制 base64 体积 */
+const AVATAR_SIZE = 144
+
+/**
+ * 把用户选中的图片压缩为正方形头像 data URL。
+ *
+ * 没有文件上传接口，头像以 base64 内联在 avatarUrl 字段落库，
+ * 因此在渲染层完成「居中裁剪 + 等比缩放 + JPEG 有损压缩」，
+ * 把体积控制在 10KB 量级。Electron / 安卓 WebView / 浏览器均可运行。
+ */
+function compressAvatar(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) {
+      reject(new Error('请选择图片文件'))
+      return
+    }
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('读取文件失败'))
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('图片解析失败'))
+      img.onload = () => {
+        // 居中裁剪为正方形后缩放到目标尺寸
+        const side = Math.min(img.width, img.height)
+        const sx = (img.width - side) / 2
+        const sy = (img.height - side) / 2
+        const canvas = document.createElement('canvas')
+        canvas.width = AVATAR_SIZE
+        canvas.height = AVATAR_SIZE
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          reject(new Error('画布不可用'))
+          return
+        }
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, AVATAR_SIZE, AVATAR_SIZE)
+        resolve(canvas.toDataURL('image/jpeg', 0.86))
+      }
+      img.src = reader.result as string
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 /** 设置页：资料卡 + 服务器与连接信息 */
 export function MeView(): JSX.Element {
@@ -18,13 +61,32 @@ export function MeView(): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [nickName, setNickName] = useState(profile?.nickName ?? '')
   const [gender, setGender] = useState(profile?.gender ?? 0)
+  const [avatarDraft, setAvatarDraft] = useState(profile?.avatarUrl ?? '')
   const [busy, setBusy] = useState(false)
   const [serverOpen, setServerOpen] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const startEdit = (): void => {
     setNickName(profile?.nickName ?? '')
     setGender(profile?.gender ?? 0)
+    setAvatarDraft(profile?.avatarUrl ?? '')
     setEditing(true)
+  }
+
+  const onPickAvatar = (): void => {
+    fileRef.current?.click()
+  }
+
+  const onAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // 允许连续选择同一文件
+    if (!file) return
+    try {
+      const dataUrl = await compressAvatar(file)
+      setAvatarDraft(dataUrl)
+    } catch (err) {
+      toast(err instanceof Error ? err.message : '图片处理失败', 'error')
+    }
   }
 
   const save = async (): Promise<void> => {
@@ -38,7 +100,7 @@ export function MeView(): JSX.Element {
       await updateProfile({
         nickName: nickName.trim(),
         gender,
-        avatarUrl: profile?.avatarUrl ?? ''
+        avatarUrl: avatarDraft
       })
       setEditing(false)
     } catch (err) {
@@ -62,16 +124,35 @@ export function MeView(): JSX.Element {
           <div className="me-avatar-glow">
             <Avatar
               name={profile?.nickName || '我'}
-              url={profile?.avatarUrl}
+              url={editing ? avatarDraft || undefined : profile?.avatarUrl}
               size={72}
               online
             />
+            {editing && (
+              <motion.button
+                className="me-avatar-cam"
+                title="更换头像"
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.9 }}
+                onClick={onPickAvatar}
+              >
+                <CameraIcon width={13} height={13} />
+              </motion.button>
+            )}
           </div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => void onAvatarChange(e)}
+          />
           <div className="me-hero-text">
             <h2>{profile?.nickName || '未命名'}</h2>
             <div className="me-tags">
               <span className="me-tag">ID {profile?.userId ?? '-'}</span>
               <span className="me-tag">{genderText}</span>
+              {editing && <span className="me-tag">点相机换头像</span>}
             </div>
           </div>
           {!editing && (
