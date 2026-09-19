@@ -46,6 +46,10 @@ type Server struct {
 	presence *Presence
 	upgrader websocket.Upgrader
 
+	// verifier 负责令牌校验：本地验签 + （按配置）向账号中心确认未被吊销。
+	// 网关不自己解析令牌，避免 HTTP 与 WS 两条入口的鉴权语义出现偏差。
+	verifier *auth.Verifier
+
 	idGen *xid.Generator
 	log   *klog.Helper
 
@@ -143,6 +147,7 @@ func NewServer(
 	c *conf.Config,
 	registry *Registry,
 	presence *Presence,
+	verifier *auth.Verifier,
 	idGen *xid.Generator,
 	handler UpstreamHandler,
 	logger klog.Logger,
@@ -151,6 +156,7 @@ func NewServer(
 		cfg:      c,
 		registry: registry,
 		presence: presence,
+		verifier: verifier,
 		idGen:    idGen,
 		handler:  handler,
 		addr:     c.App.WSAddr,
@@ -205,7 +211,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	// 鉴权必须在升级之前完成：升级后再校验的话，非法连接已经占用了
 	// 一个 WebSocket 连接与对应资源，且客户端拿到的是「连接成功后立刻断开」
 	// 这种难以处理的错误形态。
-	uid, err := s.authenticate(r)
+	//
+	// 鉴权可能包含一次跨服务调用（向账号中心确认令牌未被吊销），
+	// 因此显式设置超时：不能让建立连接的过程被下游卡住。
+	authCtx, cancel := context.WithTimeout(r.Context(), authTimeout)
+	defer cancel()
+
+	uid, err := s.authenticate(authCtx, r)
 	if err != nil {
 		s.log.Warnw("msg", "WebSocket 鉴权失败", "err", err, "remote", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -253,7 +265,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 //
 // 优先取查询参数：浏览器的 WebSocket API 无法自定义请求头，
 // 只能把令牌放在 URL 上；移动端则可选地使用请求头。
-func (s *Server) authenticate(r *http.Request) (int64, error) {
+//
+// 校验委托给 auth.Verifier：它在本地验签之外还会（按配置）向账号中心
+// 确认令牌未被吊销，因此被踢下线的设备无法再建立长连接。
+func (s *Server) authenticate(ctx context.Context, r *http.Request) (int64, error) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		token = strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
@@ -261,11 +276,7 @@ func (s *Server) authenticate(r *http.Request) (int64, error) {
 	if token == "" {
 		return 0, auth.ErrMissingToken
 	}
-	uid, _, err := auth.Parse(s.cfg.App.JWTSecret, token)
-	if err != nil {
-		return 0, err
-	}
-	return uid, nil
+	return s.verifier.Verify(ctx, token)
 }
 
 // readPump 读取客户端消息，阻塞直到连接关闭。

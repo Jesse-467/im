@@ -44,6 +44,7 @@ func NewHTTPServer(
 	logger klog.Logger,
 	chatSvc *service.ChatService,
 	wsSrv *ws.Server,
+	verifier *auth.Verifier,
 	checkers []health.Checker,
 ) *HTTPServer {
 	if c.IsProd() {
@@ -69,7 +70,7 @@ func NewHTTPServer(
 	}
 
 	s.registerProbes(c, checkers)
-	s.registerRoutes(c, chatSvc)
+	s.registerRoutes(c, chatSvc, verifier)
 
 	// WebSocket 挂载在同一个 HTTP 引擎上：
 	// 这样只暴露一个端口，WS 与 HTTP 共用同一套中间件与 TLS 配置，
@@ -123,8 +124,8 @@ func (s *HTTPServer) registerProbes(c *conf.Config, checkers []health.Checker) {
 //
 // 全部业务路由统一挂在鉴权中间件下：聊天数据以用户维度隔离，
 // 任何匿名访问都不应被允许。逐个路由决定是否鉴权很容易漏，因此按组统一处理。
-func (s *HTTPServer) registerRoutes(c *conf.Config, svc *service.ChatService) {
-	api := s.Group("/api", requireAuth(c.App.JWTSecret))
+func (s *HTTPServer) registerRoutes(c *conf.Config, svc *service.ChatService, verifier *auth.Verifier) {
+	api := s.Group("/api", requireAuth(verifier))
 
 	// ── 会话 ──
 	api.POST("/group/message_group_info_list", svc.HTTPMessageGroupInfoList)
@@ -154,7 +155,10 @@ func (s *HTTPServer) registerRoutes(c *conf.Config, svc *service.ChatService) {
 //
 // 为什么按路由组统一挂载而不是逐个路由决定：鉴权是"默认拒绝"的语义，
 // 漏挂一个路由就等于开了一个匿名入口，按组处理可以从结构上避免这种疏漏。
-func requireAuth(secret string) gin.HandlerFunc {
+//
+// 校验交给 auth.Verifier：它在本地验签之外，还会（按配置）向账号中心确认
+// 令牌未被吊销，因此「设备被踢下线」后旧令牌无法继续访问 HTTP 接口。
+func requireAuth(verifier *auth.Verifier) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		raw := ctx.GetHeader("Authorization")
 		token := strings.TrimSpace(strings.TrimPrefix(raw, "Bearer "))
@@ -164,8 +168,11 @@ func requireAuth(secret string) gin.HandlerFunc {
 			return
 		}
 
-		uid, _, err := auth.Parse(secret, token)
+		uid, err := verifier.Verify(ctx.Request.Context(), token)
 		if err != nil {
+			// 令牌无效与「无法确认令牌状态」对外都按未认证处理。
+			// 后者虽然本质是服务端故障，但放行是不可接受的（fail-closed），
+			// 细节已由 Verifier 记入日志。
 			httpx.Fail(ctx, errs.Wrap(err, errs.CodeUnauthorized, ""))
 			ctx.Abort()
 			return

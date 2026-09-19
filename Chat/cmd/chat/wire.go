@@ -11,6 +11,7 @@ import (
 	klog "github.com/go-kratos/kratos/v2/log"
 	"github.com/google/wire"
 
+	"github.com/Jesse-467/im/Chat/internal/auth"
 	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/conf"
 	"github.com/Jesse-467/im/Chat/internal/consumer"
@@ -27,6 +28,7 @@ import (
 func initApp(cfg *conf.Config, logger klog.Logger) (*kratos.App, func(), error) {
 	panic(wire.Build(
 		data.ProviderSet,
+		auth.ProviderSet,
 		biz.ProviderSet,
 		service.ProviderSet,
 		server.ProviderSet,
@@ -68,11 +70,12 @@ func newWSServer(
 	cfg *conf.Config,
 	registry *ws.Registry,
 	presence *ws.Presence,
+	verifier *auth.Verifier,
 	gen *xid.Generator,
 	chatSvc *service.ChatService,
 	logger klog.Logger,
 ) *ws.Server {
-	return ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
+	return ws.NewServer(cfg, registry, presence, verifier, gen, chatSvc.HandleUpstream, logger)
 }
 
 // newApp 组装 Kratos 应用。

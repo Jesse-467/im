@@ -4,6 +4,8 @@ import (
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/Jesse-467/im/Chat/internal/auth"
+	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/health"
 )
 
@@ -23,6 +25,7 @@ var ProviderSet = wire.NewSet(
 	NewIDGenerator,
 	NewNodeID,
 	NewAccountClient,
+	ProvideTokenVerifierClient,
 	NewPostgresChecker,
 	NewRedisChecker,
 	NewHealthCheckers,
@@ -35,6 +38,19 @@ var ProviderSet = wire.NewSet(
 // 由这里统一提供客户端实例，保证全进程复用同一个连接池。
 func ProvideCache(d *Data) redis.UniversalClient {
 	return d.cache
+}
+
+// ProvideTokenVerifierClient 把账号中心客户端收窄为「只校验令牌」的能力。
+//
+// NewAccountClient 的返回类型是 biz.UserProvider，而鉴权层需要的是
+// auth.Client（只含 VerifyToken）。这里做一次显式类型断言完成绑定：
+// 接口断言失败会在启动时直接 panic，而不是留到运行时才发现装配错误。
+func ProvideTokenVerifierClient(provider biz.UserProvider) auth.Client {
+	client, ok := provider.(auth.Client)
+	if !ok {
+		panic("data: 账号中心客户端未实现 auth.Client（缺少 VerifyToken）")
+	}
+	return client
 }
 
 // NewHealthCheckers 汇总全部依赖探测器，供 /readyz 使用。

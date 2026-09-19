@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"github.com/Jesse-467/im/Chat/internal/auth"
 	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/conf"
 	"github.com/Jesse-467/im/Chat/internal/consumer"
@@ -58,11 +59,15 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 	nodeName := ws.ProvideNodeName(nodeID)
 	presence := ws.NewPresence(universalClient, nodeName, logger)
 	registry := ws.NewRegistry(presence, logger)
-	wsServer := newWSServer(cfg, registry, presence, generator, chatService, logger)
+	jwtSecret := auth.ProvideJWTSecret(cfg)
+	client := data.ProvideTokenVerifierClient(userProvider)
+	tokenVerifier := auth.ProvideTokenVerifier(cfg, client)
+	verifier := auth.NewVerifier(jwtSecret, tokenVerifier, logger)
+	wsServer := newWSServer(cfg, registry, presence, verifier, generator, chatService, logger)
 	postgresChecker := data.NewPostgresChecker(dataData)
 	redisChecker := data.NewRedisChecker(dataData)
 	v := data.NewHealthCheckers(postgresChecker, redisChecker)
-	httpServer := server.NewHTTPServer(cfg, logger, chatService, wsServer, v)
+	httpServer := server.NewHTTPServer(cfg, logger, chatService, wsServer, verifier, v)
 	outboxRepo := data.NewOutboxRepo(dataData)
 	publisher, cleanup3, err := mq.NewPublisher(cfg, logger)
 	if err != nil {
@@ -118,11 +123,12 @@ func newWSServer(
 	cfg *conf.Config,
 	registry *ws.Registry,
 	presence *ws.Presence,
+	verifier *auth.Verifier,
 	gen *xid.Generator,
 	chatSvc *service.ChatService,
 	logger log.Logger,
 ) *ws.Server {
-	return ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
+	return ws.NewServer(cfg, registry, presence, verifier, gen, chatSvc.HandleUpstream, logger)
 }
 
 // newApp 组装 Kratos 应用。

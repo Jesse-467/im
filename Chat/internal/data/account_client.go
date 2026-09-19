@@ -17,7 +17,10 @@ import (
 )
 
 // 编译期断言：账号中心客户端必须满足业务层声明的接口。
-var _ biz.UserProvider = (*accountClient)(nil)
+var (
+	_ biz.UserProvider  = (*accountClient)(nil)
+	_ biz.TokenVerifier = (*accountClient)(nil)
+)
 
 // userBriefCacheTTL 是用户简要信息的缓存时长。
 //
@@ -73,6 +76,30 @@ func NewAccountClient(d *Data, c *conf.Config, logger klog.Logger) (biz.UserProv
 		cache: d.Cache(),
 		log:   log,
 	}, cleanup, nil
+}
+
+// VerifyToken 向账号中心确认令牌是否仍然有效。
+//
+// 这是「设备被踢下线 / 改密」能即时生效的关键链路：聊天的本地校验只能判断
+// 签名与过期时间，无法知道令牌是否已被吊销，因此必须回到账号中心确认。
+//
+// 返回值语义严格对齐账号中心的约定：
+//   - (false, 0, nil)  → 令牌不该被接受（过期 / 被吊销 / 签名错），业务分支；
+//   - (false, 0, err)  → 调用失败（网络或账号中心故障），调用方应 fail-closed。
+//
+// 刻意不在此处缓存结果：缓存的窗口期内被吊销的令牌仍会被放行，
+// 这与本功能的目的（即时踢下线）相冲突。
+func (c *accountClient) VerifyToken(ctx context.Context, accessToken string) (bool, int64, error) {
+	resp, err := c.cli.VerifyToken(ctx, &accountv1.VerifyTokenRequest{AccessToken: accessToken})
+	if err != nil {
+		// 如实返回错误而不是 (false, nil)：账号中心不可达属于服务端故障，
+		// 调用方需要区分「令牌无效」与「无法确认」，否则监控上看不出来。
+		return false, 0, fmt.Errorf("data: 调用账号中心校验令牌失败: %w", err)
+	}
+	if !resp.GetValid() {
+		return false, 0, nil
+	}
+	return true, resp.GetUserId(), nil
 }
 
 // BatchGetBriefs 批量获取用户简要信息，命中缓存的用户不再访问账号中心。

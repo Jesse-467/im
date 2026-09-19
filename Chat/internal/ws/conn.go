@@ -32,6 +32,14 @@ const (
 	pingPeriod = 50 * time.Second
 	// maxMessageSize 限制客户端上行单条消息大小，防止超大帧耗尽内存
 	maxMessageSize = 4096
+
+	// authTimeout 是建立连接时鉴权的最长耗时。
+	//
+	// 鉴权可能包含一次向账号中心确认令牌状态的跨服务调用，
+	// 必须有超时：否则账号中心卡住会让新连接全部挂起，
+	// 表现为「服务还活着，但没人能连上」。
+	// 取值偏短是因为这是用户可感知的握手阶段，宁可让客户端重试。
+	authTimeout = 3 * time.Second
 )
 
 // Message 是下行投递的消息体。

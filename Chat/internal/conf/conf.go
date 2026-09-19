@@ -206,6 +206,18 @@ type App struct {
 	// 取值 0 表示按主机名哈希推导，容器环境下建议显式注入（如取 StatefulSet 序号），
 	// 否则宿主名随机会导致重启后节点号漂移。
 	NodeID int64
+
+	// VerifyTokenRemote 决定鉴权时是否向账号中心确认令牌未被吊销。
+	//
+	//   - true（默认）：本地校验签名与过期后，再调用账号中心的 VerifyToken。
+	//     只有账号中心采用 db 模式时，这条链路才有意义——它让「设备被踢下线」
+	//     与「改密」能即时生效，而不必等令牌自然过期。
+	//   - false：仅本地校验（等价于账号中心的 self 模式），零跨服务依赖，
+	//     但无法感知吊销。适用于账号中心本身就跑在 self 模式的部署。
+	//
+	// 之所以做成开关而不是无条件调用：每次鉴权多一次 gRPC 往返，
+	// 在账号中心为 self 模式时这次调用纯属浪费。
+	VerifyTokenRemote bool
 }
 
 // IsProd 是否为生产环境。
@@ -302,6 +314,7 @@ func Load() (*Config, error) {
 			// 而后者要在第一次调用账号中心时才会暴露。
 			AccountRPCEndpoint: envString("ACCOUNT_RPC_ENDPOINT", ""),
 			NodeID:             int64(envInt("NODE_ID", 0)),
+			VerifyTokenRemote:  envBool("VERIFY_TOKEN_REMOTE", true),
 		},
 	}
 
