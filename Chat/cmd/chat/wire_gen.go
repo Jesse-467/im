@@ -15,6 +15,8 @@ import (
 	"github.com/Jesse-467/im/Chat/internal/relay"
 	"github.com/Jesse-467/im/Chat/internal/server"
 	"github.com/Jesse-467/im/Chat/internal/service"
+	"github.com/Jesse-467/im/Chat/internal/ws"
+	"github.com/Jesse-467/im/Chat/internal/xid"
 	"github.com/go-kratos/kratos/v2"
 	"github.com/go-kratos/kratos/v2/log"
 	"time"
@@ -23,9 +25,6 @@ import (
 // Injectors from wire.go:
 
 // initApp 的装配实现由 Wire 在编译期生成到 wire_gen.go，运行时零反射开销。
-//
-// 依赖关系完全由各层的 ProviderSet 声明（data → biz → service → server），
-// 新增组件只需改动对应的 ProviderSet，无需手工维护初始化顺序。
 func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 	dataData, cleanup, err := data.NewData(cfg, logger)
 	if err != nil {
@@ -38,24 +37,31 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
-	idGenerator, err := data.NewIDGenerator(cfg)
+	generator, err := data.NewSnowflake(cfg)
 	if err != nil {
 		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
+	idGenerator := data.NewIDGenerator(generator)
 	conversationUseCase := biz.NewConversationUseCase(conversationRepo, messageRepo, userProvider, idGenerator, logger)
 	friendRepo := data.NewFriendRepo(dataData)
 	friendUseCase := biz.NewFriendUseCase(friendRepo, conversationUseCase, userProvider, logger)
 	groupUseCase := biz.NewGroupUseCase(conversationRepo, conversationUseCase, userProvider, idGenerator, logger)
 	seqAllocator := data.NewSeqAllocator(dataData)
-	string2 := biz.ProvideMessageTopic(cfg)
-	messageUseCase := biz.NewMessageUseCase(messageRepo, conversationRepo, conversationUseCase, seqAllocator, idGenerator, string2, logger)
+	messageTopic := biz.ProvideMessageTopic(cfg)
+	messageUseCase := biz.NewMessageUseCase(messageRepo, conversationRepo, conversationUseCase, seqAllocator, idGenerator, messageTopic, logger)
 	chatService := service.NewChatService(conversationUseCase, friendUseCase, groupUseCase, messageUseCase, cfg, logger)
+	registry := ws.NewRegistry(logger)
+	universalClient := data.ProvideCache(dataData)
+	nodeID := data.NewNodeID(cfg)
+	nodeName := ws.ProvideNodeName(nodeID)
+	presence := ws.NewPresence(universalClient, nodeName, logger)
+	wsServer := newWSServer(cfg, registry, presence, generator, chatService, logger)
 	postgresChecker := data.NewPostgresChecker(dataData)
 	redisChecker := data.NewRedisChecker(dataData)
 	v := data.NewHealthCheckers(postgresChecker, redisChecker)
-	httpServer := server.NewHTTPServer(cfg, logger, chatService, v)
+	httpServer := server.NewHTTPServer(cfg, logger, chatService, wsServer, v)
 	outboxRepo := data.NewOutboxRepo(dataData)
 	publisher, cleanup3, err := mq.NewPublisher(cfg, logger)
 	if err != nil {
@@ -64,7 +70,7 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 		return nil, nil, err
 	}
 	relay := newRelay(outboxRepo, publisher, logger)
-	app := newApp(cfg, logger, httpServer, relay)
+	app := newApp(cfg, logger, httpServer, wsServer, relay)
 	return app, func() {
 		cleanup3()
 		cleanup2()
@@ -79,6 +85,30 @@ func newRelay(outbox biz.OutboxRepo, pub mq.Publisher, logger log.Logger) *relay
 	return relay.New(outbox, pub, logger)
 }
 
+// newWSServer 构造 WebSocket 网关，并把下行推送能力回注给业务服务。
+//
+// 这里存在一个双向依赖：网关需要 ChatService 处理上行消息，
+// 而 ChatService 需要网关推送下行消息。用显式装配函数打破：
+// 先构造网关（此时它的 handler 由闭包延迟绑定），
+// 再把网关作为 Pusher 注入 ChatService。
+//
+// 之所以不在构造函数里互相传入：那会形成无法解开的环；
+// 用延迟绑定可以让依赖方向在运行时单向化，也让「推送是可选能力」
+// 这一事实在代码结构上直接可见。
+func newWSServer(
+	cfg *conf.Config,
+	registry *ws.Registry,
+	presence *ws.Presence,
+	gen *xid.Generator,
+	chatSvc *service.ChatService,
+	logger log.Logger,
+) *ws.Server {
+	srv := ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
+
+	chatSvc.SetPusher(registry)
+	return srv
+}
+
 // newApp 组装 Kratos 应用。
 //
 // 投递协程通过 Kratos 的生命周期钩子接入：
@@ -89,12 +119,13 @@ func newApp(
 	cfg *conf.Config,
 	logger log.Logger,
 	hs *server.HTTPServer,
+	wsSrv *ws.Server,
 	r *relay.Relay,
 ) *kratos.App {
 
 	relayCtx, cancelRelay := context.WithCancel(context.Background())
 
-	return kratos.New(kratos.Name(cfg.ServiceName), kratos.Version(Version), kratos.Logger(logger), kratos.StopTimeout(15*time.Second), kratos.Server(hs), kratos.AfterStart(func(_ context.Context) error {
+	return kratos.New(kratos.Name(cfg.ServiceName), kratos.Version(Version), kratos.Logger(logger), kratos.StopTimeout(15*time.Second), kratos.Server(hs, wsSrv), kratos.AfterStart(func(_ context.Context) error {
 		go r.Run(relayCtx)
 		return nil
 	}), kratos.BeforeStop(func(_ context.Context) error {

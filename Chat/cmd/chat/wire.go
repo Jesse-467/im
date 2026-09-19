@@ -18,20 +18,21 @@ import (
 	"github.com/Jesse-467/im/Chat/internal/relay"
 	"github.com/Jesse-467/im/Chat/internal/server"
 	"github.com/Jesse-467/im/Chat/internal/service"
+	"github.com/Jesse-467/im/Chat/internal/ws"
+	"github.com/Jesse-467/im/Chat/internal/xid"
 )
 
 // initApp 的装配实现由 Wire 在编译期生成到 wire_gen.go，运行时零反射开销。
-//
-// 依赖关系完全由各层的 ProviderSet 声明（data → biz → service → server），
-// 新增组件只需改动对应的 ProviderSet，无需手工维护初始化顺序。
 func initApp(cfg *conf.Config, logger klog.Logger) (*kratos.App, func(), error) {
 	panic(wire.Build(
 		data.ProviderSet,
 		biz.ProviderSet,
 		service.ProviderSet,
 		server.ProviderSet,
+		ws.ProviderSet,
 		mq.NewPublisher,
 		newRelay,
+		newWSServer,
 		newApp,
 	))
 }
@@ -39,6 +40,30 @@ func initApp(cfg *conf.Config, logger klog.Logger) (*kratos.App, func(), error) 
 // newRelay 构造 Outbox 投递协程。
 func newRelay(outbox biz.OutboxRepo, pub mq.Publisher, logger klog.Logger) *relay.Relay {
 	return relay.New(outbox, pub, logger)
+}
+
+// newWSServer 构造 WebSocket 网关，并把下行推送能力回注给业务服务。
+//
+// 这里存在一个双向依赖：网关需要 ChatService 处理上行消息，
+// 而 ChatService 需要网关推送下行消息。用显式装配函数打破：
+// 先构造网关（此时它的 handler 由闭包延迟绑定），
+// 再把网关作为 Pusher 注入 ChatService。
+//
+// 之所以不在构造函数里互相传入：那会形成无法解开的环；
+// 用延迟绑定可以让依赖方向在运行时单向化，也让「推送是可选能力」
+// 这一事实在代码结构上直接可见。
+func newWSServer(
+	cfg *conf.Config,
+	registry *ws.Registry,
+	presence *ws.Presence,
+	gen *xid.Generator,
+	chatSvc *service.ChatService,
+	logger klog.Logger,
+) *ws.Server {
+	srv := ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
+	// 把网关作为推送实现注入业务服务，完成双向连接的闭环
+	chatSvc.SetPusher(registry)
+	return srv
 }
 
 // newApp 组装 Kratos 应用。
@@ -51,6 +76,7 @@ func newApp(
 	cfg *conf.Config,
 	logger klog.Logger,
 	hs *server.HTTPServer,
+	wsSrv *ws.Server,
 	r *relay.Relay,
 ) *kratos.App {
 	// relayCtx 的生命周期与应用绑定：cancel 在退出时调用
@@ -62,7 +88,7 @@ func newApp(
 		kratos.Logger(logger),
 		// 优雅停止超时：为在途请求与连接排空留出时间
 		kratos.StopTimeout(15*time.Second),
-		kratos.Server(hs),
+		kratos.Server(hs, wsSrv),
 		kratos.AfterStart(func(_ context.Context) error {
 			go r.Run(relayCtx)
 			return nil

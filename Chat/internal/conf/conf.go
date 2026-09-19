@@ -151,6 +151,13 @@ type App struct {
 	GRPCAddr        string
 	JWTSecret       string
 	JWTAccessExpire time.Duration
+	// WSAddr 是 WebSocket 网关对外声明的地址。
+	//
+	// 网关本身不独立监听端口（挂载在 HTTP 引擎上），该地址用于
+	// 生成对客户端下发的连接地址，以及服务注册时的 Endpoint。
+	WSAddr string
+	// WSPath 是 WebSocket 的挂载路径
+	WSPath string
 	// AccountRPCEndpoint 是 Chat 依赖的账号中心 gRPC 地址。
 	//
 	// 聊天服务只通过 gRPC 契约消费账号能力（如用户信息查询），
@@ -247,6 +254,8 @@ func Load() (*Config, error) {
 			GRPCAddr:           envString("GRPC_ADDR", "0.0.0.0:9002"),
 			JWTSecret:          envString("JWT_SECRET", ""),
 			JWTAccessExpire:    envDuration("JWT_ACCESS_EXPIRE", 86400*time.Second),
+			WSAddr:             envString("WS_ADDR", "127.0.0.1:8002"),
+			WSPath:             envString("WS_PATH", "/ws"),
 			AccountRPCEndpoint: envString("ACCOUNT_RPC_ENDPOINT", "127.0.0.1:9001"),
 			NodeID:             int64(envInt("NODE_ID", 0)),
 		},

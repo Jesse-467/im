@@ -158,7 +158,7 @@ func NewMessageUseCase(
 	convUC *ConversationUseCase,
 	seq SeqAllocator,
 	idGen IDGenerator,
-	topic string,
+	topic MessageTopic,
 	logger klog.Logger,
 ) *MessageUseCase {
 	return &MessageUseCase{
@@ -167,7 +167,7 @@ func NewMessageUseCase(
 		convUC:   convUC,
 		seq:      seq,
 		idGen:    idGen,
-		topic:    topic,
+		topic:    string(topic),
 		log:      klog.NewHelper(klog.With(logger, "module", "biz/message")),
 	}
 }

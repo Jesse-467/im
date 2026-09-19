@@ -17,6 +17,7 @@ import (
 	"github.com/Jesse-467/im/Chat/internal/health"
 	"github.com/Jesse-467/im/Chat/internal/httpx"
 	"github.com/Jesse-467/im/Chat/internal/service"
+	"github.com/Jesse-467/im/Chat/internal/ws"
 )
 
 // 编译期断言：Gin 服务必须满足 Kratos 的传输层契约。
@@ -42,6 +43,7 @@ func NewHTTPServer(
 	c *conf.Config,
 	logger klog.Logger,
 	chatSvc *service.ChatService,
+	wsSrv *ws.Server,
 	checkers []health.Checker,
 ) *HTTPServer {
 	if c.IsProd() {
@@ -68,6 +70,13 @@ func NewHTTPServer(
 
 	s.registerProbes(c, checkers)
 	s.registerRoutes(c, chatSvc)
+
+	// WebSocket 挂载在同一个 HTTP 引擎上：
+	// 这样只暴露一个端口，WS 与 HTTP 共用同一套中间件与 TLS 配置，
+	// 也省去了为长连接单独做负载均衡配置的麻烦。
+	if wsSrv != nil {
+		s.GET(c.App.WSPath, wsSrv.Handler())
+	}
 
 	return s
 }

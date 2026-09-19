@@ -6,6 +6,13 @@ import (
 	"github.com/Jesse-467/im/Chat/internal/conf"
 )
 
+// MessageTopic 是消息投递主题名。
+//
+// 定义为具名类型而非直接用 string：服务中需要注入的字符串不止一个
+// （主题名、节点 ID 等），若都用 string，依赖注入会因类型相同而无法区分。
+// 具名类型让每个字符串在类型系统里各有身份。
+type MessageTopic string
+
 // ProviderSet 是 biz 层的依赖注入集合。
 //
 // 这里的用例之间存在同层协作：FriendUseCase 依赖 ConversationUseCase，
@@ -19,11 +26,7 @@ var ProviderSet = wire.NewSet(
 	ProvideMessageTopic,
 )
 
-// ProvideMessageTopic 提取消息主题名供 Wire 注入。
-//
-// 之所以单独写一个 provider：NewMessageUseCase 需要 string 类型的 topic，
-// 而 Wire 无法从 *conf.Config 自动推导出 string（那样会让所有 string 参数
-// 都混在一起）。用一个具名 provider 表达意图，也让依赖关系在装配图上更明确。
-func ProvideMessageTopic(c *conf.Config) string {
-	return c.MQ.MessageTopic()
+// ProvideMessageTopic 提供消息主题名。
+func ProvideMessageTopic(c *conf.Config) MessageTopic {
+	return MessageTopic(c.MQ.MessageTopic())
 }
