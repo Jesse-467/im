@@ -1,0 +1,244 @@
+/* ============================================================================
+   主框架：标题栏 + 功能条 + 视图层
+   ========================================================================== */
+
+.shell {
+  position: relative;
+  height: 100vh;
+  overflow: hidden;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  grid-template-rows: 40px 1fr;
+  grid-template-areas:
+    'titlebar titlebar'
+    'rail body';
+}
+
+/* ── 自绘标题栏（可拖拽） ─────────────────────────────────────────────── */
+
+.titlebar {
+  grid-area: titlebar;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px 0 16px;
+  -webkit-app-region: drag;
+  z-index: 50;
+}
+
+.titlebar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 3px;
+}
+
+.titlebar-logo {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--brand-grad);
+  box-shadow: 0 0 8px rgba(0, 153, 255, 0.65);
+}
+
+.titlebar-controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-btn {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 30px;
+  margin-left: 2px;
+  border-radius: 8px;
+  color: var(--text-2);
+  transition: background 0.15s, color 0.15s;
+}
+
+.titlebar-btn:hover {
+  background: var(--hover);
+  color: var(--text-1);
+}
+
+.titlebar-btn-close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ── 主区域 ───────────────────────────────────────────────────────────── */
+
+.rail {
+  grid-area: rail;
+  flex: none;
+  width: 74px;
+  margin: 0 0 12px 10px;
+  border-radius: 20px;
+  background: var(--rail);
+  backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 0 10px;
+  gap: 6px;
+}
+
+.rail-avatar {
+  position: relative;
+  margin-bottom: 14px;
+  border-radius: 16px;
+  padding: 3px;
+  transition: transform 0.2s;
+}
+
+.rail-avatar:hover {
+  transform: translateY(-1px);
+}
+
+.rail-avatar-ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 19px;
+  background: conic-gradient(#12b7f5, #7c66ff, #0a7ffb, #12b7f5);
+  filter: blur(4px);
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+
+.rail-avatar:hover .rail-avatar-ring {
+  opacity: 0.55;
+}
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 0 8px;
+}
+
+.rail-bottom {
+  margin-top: auto;
+  width: 100%;
+  padding: 0 8px;
+}
+
+.rail-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 9px 0 7px;
+  border-radius: 14px;
+  color: var(--text-3);
+  transition: color 0.2s;
+}
+
+.rail-item:hover {
+  color: var(--text-1);
+}
+
+.rail-item:has(.rail-active-pill) {
+  color: #fff;
+}
+
+.rail-item:has(.rail-active-pill):hover {
+  color: #fff;
+}
+
+.rail-active-pill {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  background: var(--brand-grad);
+  box-shadow: 0 8px 20px rgba(10, 127, 251, 0.35);
+}
+
+.rail-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+}
+
+.rail-item:hover:not(:has(.rail-active-pill)) .rail-icon {
+  color: var(--brand-deep);
+}
+
+.rail-label {
+  position: relative;
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.rail-badge {
+  position: absolute;
+  top: 3px;
+  right: 8px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ff6a6a, #f53f3f);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(245, 63, 63, 0.4);
+}
+
+/* ── 视图容器 ─────────────────────────────────────────────────────────── */
+
+.shell-body {
+  grid-area: body;
+  min-width: 0;
+  padding: 0 12px 12px 0;
+}
+
+.shell-view {
+  height: 100%;
+}
+
+/* ── 右下角连接状态 ───────────────────────────────────────────────────── */
+
+.status-dock {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 4px 12px rgba(31, 45, 61, 0.12);
+}
+
+.conn-dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.conn-dot-ok {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(0, 180, 42, 0.6);
+}
+
+.conn-dot-bad {
+  background: #ffb400;
+  box-shadow: 0 0 8px rgba(255, 180, 0, 0.6);
+}

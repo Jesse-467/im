@@ -34,6 +34,10 @@ coverage.txt
 # ── 调试 ──
 __debug_bin
 
+# ── 前端包管理器本地缓存 ──
+.pnpm-store/
+node_modules/
+
 # ── Go 工作区 ──
 # 本项目刻意不使用 go.work：跨模块引用统一走仓库依赖（伪版本），
 # 以保证各 module 真正独立，可单独构建与发布。IDE 可能自动生成以下文件，直接忽略。

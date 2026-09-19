@@ -1,0 +1,138 @@
+/* ============================================================================
+   登录 / 注册：悬浮玻璃卡片 + 品牌光斑
+   ========================================================================== */
+
+.auth-view {
+  position: relative;
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.auth-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.auth-blob-a {
+  width: 460px;
+  height: 460px;
+  left: -120px;
+  top: -140px;
+  background: radial-gradient(circle, #35c3ff, #0a7ffb);
+  animation: blobDrift 9s ease-in-out infinite alternate;
+}
+
+.auth-blob-b {
+  width: 400px;
+  height: 400px;
+  right: -100px;
+  bottom: -160px;
+  background: radial-gradient(circle, #8f6bff, #5b8cff);
+  animation: blobDrift 11s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes blobDrift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(36px, 26px, 0) scale(1.08);
+  }
+}
+
+.auth-card {
+  position: relative;
+  z-index: 1;
+  width: 372px;
+  padding: 34px 34px 24px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(24px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow:
+    0 30px 80px rgba(23, 40, 74, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 26px;
+}
+
+.auth-brand-text h1 {
+  font-size: 24px;
+  letter-spacing: 6px;
+  background: var(--brand-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.auth-brand-text p {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-3);
+  letter-spacing: 3px;
+}
+
+/* 分段页签 */
+.auth-tabs {
+  position: relative;
+  display: flex;
+  background: rgba(31, 45, 61, 0.055);
+  border-radius: 999px;
+  padding: 3px;
+  margin-bottom: 20px;
+}
+
+.auth-tab {
+  position: relative;
+  flex: 1;
+  height: 34px;
+  border-radius: 999px;
+}
+
+.auth-tab-pill {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(31, 45, 61, 0.12);
+}
+
+.auth-tab-text {
+  position: relative;
+  font-size: 13.5px;
+  color: var(--text-3);
+  line-height: 34px;
+  transition: color 0.2s;
+}
+
+.auth-tab-text.active {
+  color: var(--brand-deep);
+  font-weight: 600;
+}
+
+.auth-form {
+  min-height: 190px;
+}
+
+.auth-form .primary-btn {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.auth-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}

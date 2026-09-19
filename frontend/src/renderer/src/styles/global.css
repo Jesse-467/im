@@ -1,0 +1,152 @@
+/* ============================================================================
+   微语 IM · 全局基础与设计令牌
+   QQ 风格：浅色玻璃卡片浮层 + 蓝色品牌渐变 + 圆角矩形语言
+   ========================================================================== */
+
+:root {
+  /* 品牌色 */
+  --brand: #0099ff;
+  --brand-deep: #0a7ffb;
+  --brand-grad: linear-gradient(135deg, #12b7f5 0%, #0a7ffb 100%);
+  --brand-soft: rgba(0, 153, 255, 0.1);
+
+  /* 文本 */
+  --text-1: #1f2329;
+  --text-2: #4e5969;
+  --text-3: #86909c;
+  --text-inverse: #fff;
+
+  /* 表面 */
+  --bg-base: #e8edf4;
+  --bg-app: linear-gradient(160deg, #eaf1f8 0%, #e6ebf3 45%, #e3e9f4 100%);
+  --panel: rgba(255, 255, 255, 0.86);
+  --panel-solid: #ffffff;
+  --rail: rgba(247, 250, 253, 0.72);
+  --hover: rgba(31, 45, 61, 0.055);
+  --line: rgba(31, 35, 41, 0.08);
+  --danger: #f53f3f;
+  --success: #00b42a;
+
+  /* 阴影：卡片层级 / 弹层 */
+  --shadow-card: 0 10px 34px rgba(31, 45, 61, 0.1), 0 2px 8px rgba(31, 45, 61, 0.04);
+  --shadow-pop: 0 18px 50px rgba(31, 45, 61, 0.2), 0 4px 14px rgba(31, 45, 61, 0.08);
+
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+
+  --font: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'HarmonyOS Sans SC',
+    'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  color: var(--text-1);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* 层级感底纹：两团品牌色晕染在浅底之上 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(720px 480px at 8% 100%, rgba(18, 183, 245, 0.14), transparent 62%),
+    radial-gradient(860px 560px at 96% -8%, rgba(124, 102, 255, 0.12), transparent 60%),
+    radial-gradient(520px 380px at 70% 110%, rgba(0, 153, 255, 0.07), transparent 65%);
+  z-index: 0;
+}
+
+input,
+textarea,
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  border: none;
+  outline: none;
+  background: none;
+}
+
+button {
+  cursor: pointer;
+}
+
+img {
+  display: block;
+}
+
+::selection {
+  background: rgba(0, 153, 255, 0.22);
+}
+
+/* 细滚动条（QQ NT 观感：悬停才显形） */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(31, 45, 61, 0.14);
+  border-radius: 999px;
+  transition: background 0.2s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(31, 45, 61, 0.26);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 启动屏 */
+.boot-screen {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.boot-pulse {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--brand-grad);
+  box-shadow: 0 0 0 0 rgba(0, 153, 255, 0.4);
+  animation: bootPulse 1.4s ease-out infinite;
+}
+
+@keyframes bootPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(0, 153, 255, 0.35);
+  }
+  70% {
+    box-shadow: 0 0 0 18px rgba(0, 153, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 153, 255, 0);
+  }
+}
+
+/* 输入框选中文本允许（全局禁选的例外） */
+input,
+textarea {
+  user-select: text;
+}

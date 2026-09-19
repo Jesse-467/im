@@ -1,0 +1,298 @@
+/* ============================================================================
+   联系人页：好友 / 好友申请
+   ========================================================================== */
+
+.contacts-layout {
+  height: 100%;
+  min-width: 0;
+}
+
+.contacts-panel {
+  height: 100%;
+  width: 340px;
+  margin-left: 8px;
+}
+
+.contacts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.contacts-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.list-search {
+  margin: 0 14px 10px;
+}
+
+.contacts-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 0 12px;
+}
+
+/* ── 分段页签 ─────────────────────────────────────────────────────────── */
+
+.seg-tabs {
+  position: relative;
+  display: flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(31, 45, 61, 0.055);
+}
+
+.seg-tab {
+  position: relative;
+  padding: 5px 14px;
+  border-radius: 999px;
+}
+
+.seg-pill {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(31, 45, 61, 0.12);
+}
+
+.seg-text {
+  position: relative;
+  font-size: 12.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+.seg-text.active {
+  color: var(--brand-deep);
+  font-weight: 600;
+}
+
+/* ── 好友卡片 ─────────────────────────────────────────────────────────── */
+
+.contact-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: calc(100% - 12px);
+  margin: 0 6px 6px;
+  padding: 10px 11px;
+  border-radius: 14px;
+  text-align: left;
+  transition: background 0.16s;
+}
+
+.contact-card:hover {
+  background: var(--hover);
+}
+
+.contact-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.contact-name {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.contact-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.contact-chat-hint {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--brand);
+  background: var(--brand-soft);
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity 0.18s, transform 0.18s;
+}
+
+.contact-card:hover .contact-chat-hint {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* ── 好友申请卡片 ─────────────────────────────────────────────────────── */
+
+.request-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: calc(100% - 12px);
+  margin: 0 6px 8px;
+  padding: 12px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.6);
+  box-shadow: inset 0 0 0 1px rgba(31, 35, 41, 0.05);
+  transition: box-shadow 0.2s;
+}
+
+.request-card.pending {
+  background: linear-gradient(135deg, rgba(18, 183, 245, 0.07), rgba(10, 127, 251, 0.05));
+  box-shadow: inset 0 0 0 1px rgba(0, 153, 255, 0.16);
+}
+
+.request-card.done {
+  opacity: 0.68;
+}
+
+.request-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.request-title {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.request-dir {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.request-msg {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.request-time {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.request-actions {
+  display: flex;
+  gap: 7px;
+  flex: none;
+}
+
+.mini-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mini-btn.primary {
+  background: var(--brand-grad);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(10, 127, 251, 0.3);
+}
+
+.mini-btn.ghost {
+  background: rgba(31, 45, 61, 0.06);
+  color: var(--text-2);
+}
+
+.mini-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.request-waiting {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.request-status {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.request-status.s1 {
+  background: rgba(0, 180, 42, 0.12);
+  color: var(--success);
+}
+
+.request-status.s2 {
+  background: rgba(245, 63, 63, 0.1);
+  color: var(--danger);
+}
+
+.request-status.s3 {
+  background: rgba(31, 45, 61, 0.07);
+  color: var(--text-3);
+}
+
+/* ── 成员选择器（建群弹窗） ───────────────────────────────────────────── */
+
+.member-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.picker-empty {
+  font-size: 12.5px;
+  color: var(--text-3);
+  padding: 8px 2px;
+}
+
+.member-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px 6px 7px;
+  border-radius: 999px;
+  background: rgba(31, 45, 61, 0.045);
+  font-size: 12.5px;
+  color: var(--text-2);
+  transition: all 0.18s;
+}
+
+.member-chip:hover {
+  background: rgba(31, 45, 61, 0.08);
+}
+
+.member-chip.picked {
+  background: var(--brand-grad);
+  color: #fff;
+  box-shadow: 0 5px 14px rgba(10, 127, 251, 0.3);
+}
+
+.chip-check {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  color: var(--brand-deep);
+}
