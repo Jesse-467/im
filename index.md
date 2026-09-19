@@ -1249,6 +1249,44 @@ service.HTTPLogout
 （fail-closed）：db 模式的语义就是「必须确认未被吊销」，
 放行等于让被踢掉的设备重新获得访问权。
 
+#### Chat 侧如何感知吊销（`VERIFY_TOKEN_REMOTE`）
+
+账号中心的 `db` 模式只解决「谁能判断令牌是否有效」，但**聊天服务的 HTTP 中间件
+与 WebSocket 网关原本只用本地 `auth.Parse` 验签**（等价 self 模式），
+从不询问账号中心。结果是：令牌在账号中心已被标记吊销，
+聊天侧却继续放行——用户看到「设备已被踢下线，但仍能收发消息」。
+
+因此聊天侧引入 `VERIFY_TOKEN_REMOTE`（默认 `true`）：
+
+```
+请求携带令牌
+  └─▶ auth.Verifier.Verify
+        ├─ ① 本地验签（auth.Parse）      ← 零网络开销，先挡掉伪造/过期
+        └─ ② 账号中心 VerifyToken（按配置）
+              ├─ valid=true            → 放行，注入 uid
+              ├─ valid=false           → 401（已被吊销）
+              └─ 调用失败              → 401 fail-closed 并记 Error 日志
+```
+
+| 配置 | 行为 | 适用场景 |
+| --- | --- | --- |
+| `true`（默认） | 本地验签 + 回查账号中心 | 账号中心开启 `TOKEN_MODE=db`，需要即时踢下线 |
+| `false` | 仅本地验签 | 账号中心跑在 `self` 模式，回查纯属浪费一次 RPC |
+
+**为什么必须先本地再远程**：本地验签零开销，能挡掉绝大多数非法请求
+（伪造、过期）。先做它可以让无效令牌不产生任何跨服务调用，
+避免账号中心被无效令牌刷爆。
+
+**为什么回查结果不缓存**：缓存的窗口期内被吊销的令牌仍会被放行，
+这与「即时踢下线」的目的直接冲突。
+
+**为什么账号中心不可达时拒绝放行**：放行等于把「可能已被吊销」的令牌
+当成有效，被踢的设备会重新获得访问权。这是刻意的 fail-closed 取舍，
+代价是账号中心故障会导致聊天鉴权一并失败（用户需重新登录）。
+
+**HTTP 与 WS 共用同一个 Verifier**：两条入口的鉴权语义必须一致，
+否则会出现「HTTP 拒绝了但 WS 放行」这类难以排查的偏差。
+
 #### 多设备在线上限
 
 **数据结构**
@@ -2066,9 +2104,10 @@ conf.Load()
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `TOKEN_MODE` | `db` | `self`（仅校验 JWT）/ `db`（还需数据库未吊销） |
-| `MAX_DEVICES_PER_USER` | `3` | 单账号同时在线设备数上限，`0` 表示不限制 |
-| `ONLINE_DEVICE_TTL` | `720h`（30 天） | 设备在线标记（Redis ZSET）的兜底有效期，`0` 表示不过期 |
+| `TOKEN_MODE` | `db` | `self`（仅校验 JWT）/ `db`（还需数据库未吊销）（仅 Account） |
+| `MAX_DEVICES_PER_USER` | `3` | 单账号同时在线设备数上限，`0` 表示不限制（仅 Account） |
+| `ONLINE_DEVICE_TTL` | `720h`（30 天） | 设备在线标记（Redis ZSET）的兜底有效期，`0` 表示不过期（仅 Account） |
+| `VERIFY_TOKEN_REMOTE` | `true` | 鉴权时是否回查账号中心确认令牌未吊销（仅 Chat） |
 
 ---
 
@@ -2189,7 +2228,8 @@ conf.Load()
 | 收到 `code=4001` | 令牌过期，或 Account 与 Chat 的 `JWT_SECRET` 不一致 | 对比两服务的 `JWT_SECRET` |
 | 登录后被立刻踢下线 | 是本人其他端登录触发了设备上限 | 看登录响应体的 `evictedDevices`；调大 `MAX_DEVICES_PER_USER` 或让客户端上报稳定的 `deviceId` |
 | 明明只有一台设备却提示超限 | 客户端每次登录都换了新的 `deviceId`（或未上报），每次登录都算一台新设备 | 让客户端持久化 `deviceId`；查 `im:online:devices:<uid>` 的成员数 |
-| 被踢的设备仍能继续发消息 | `TOKEN_MODE=self`，该模式按设计无法提前吊销令牌 | 改为 `TOKEN_MODE=db` |
+| 被踢的设备仍能继续发消息 | `TOKEN_MODE=self`，或 Chat 的 `VERIFY_TOKEN_REMOTE=false` | 两处都要开启：Account 设 `TOKEN_MODE=db`，Chat 设 `VERIFY_TOKEN_REMOTE=true` |
+| Chat 报 `code=4001` 但令牌刚签发 | Chat 无法访问账号中心校验令牌（fail-closed 拒绝） | 检查 `ACCOUNT_RPC_ENDPOINT` 与账号中心 9001 端口连通性 |
 | 改密后其他端没掉线 | 吊销全部令牌失败（存储故障） | 搜日志关键词「改密后吊销全部令牌失败」 |
 | 校验令牌报 `5000` | `db` 模式下数据库查询故障（fail-closed 拒绝放行） | 检查 `DB_HOST` 连通性与 `/readyz` |
 | 发送消息报 `5000` | Redis 不可用（序号分配依赖它） | 检查 `CACHE_ADDRS` 与 Redis 连通性 |
