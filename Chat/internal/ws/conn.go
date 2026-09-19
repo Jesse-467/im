@@ -6,6 +6,9 @@
 package ws
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,6 +41,44 @@ const (
 type Message struct {
 	Type string `json:"type"`
 	Data any    `json:"data"`
+}
+
+// ID 是下行消息中承载大整数标识的类型，序列化为 JSON 字符串。
+//
+// 会话 ID 与消息 ID 是 19 位雪花值，超出 JavaScript 的
+// Number.MAX_SAFE_INTEGER。若按数字下发，浏览器 JSON.parse 会把它
+// 静默舍入（...784 变成 ...800），客户端再把该值回传就指向了不存在的会话。
+//
+// 之所以在本包独立定义而不是复用 service 层的类型：ws 层被 consumer 与
+// server 共同依赖，不应反向依赖 service。两个包各自的 ID 类型都只做
+// 同一件事（int64 ↔ 字符串），保持独立比引入跨层依赖更简单。
+type ID int64
+
+// MarshalJSON 输出为 JSON 字符串。
+func (i ID) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + strconv.FormatInt(int64(i), 10) + `"`), nil
+}
+
+// UnmarshalJSON 兼容字符串与数字两种字面量。
+func (i *ID) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "" || s == "null" {
+		*i = 0
+		return nil
+	}
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+		if s == "" {
+			*i = 0
+			return nil
+		}
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("ws: ID 必须是整数或整数字符串，收到 %s", data)
+	}
+	*i = ID(v)
+	return nil
 }
 
 // Conn 表示一条已建立的连接。

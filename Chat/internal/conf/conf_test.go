@@ -114,9 +114,7 @@ func TestValidateRequiredFields(t *testing.T) {
 		{"无数据库配置", func(c *Config) { c.DB = DB{MaxOpenConns: 100} }},
 		{"连接池上限为 0", func(c *Config) { c.DB.MaxOpenConns = 0 }},
 		{"负数连接池上限", func(c *Config) { c.DB.MaxOpenConns = -1 }},
-		{"无缓存地址", func(c *Config) { c.Cache.Addrs = nil }},
 		{"空 HTTP 地址", func(c *Config) { c.App.HTTPAddr = "" }},
-		{"空 gRPC 地址", func(c *Config) { c.App.GRPCAddr = "" }},
 		{"空 JWT 密钥", func(c *Config) { c.App.JWTSecret = "" }},
 		{"令牌有效期为 0", func(c *Config) { c.App.JWTAccessExpire = 0 }},
 		{"负数令牌有效期", func(c *Config) { c.App.JWTAccessExpire = -time.Hour }},
@@ -131,6 +129,89 @@ func TestValidateRequiredFields(t *testing.T) {
 				t.Fatalf("配置 %s 应当被拒绝", tc.name)
 			}
 		})
+	}
+}
+
+// TestFatalIssuesForRequiredComponents 验证必需组件缺失判定为致命。
+//
+// 这些组件缺失后服务无法对外提供任何有意义的服务，必须在启动时退出，
+// 而不是等第一个请求进来才失败。
+func TestFatalIssuesForRequiredComponents(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"无数据库配置", func(c *Config) { c.DB = DB{MaxOpenConns: 100} }},
+		{"无账号中心地址", func(c *Config) { c.App.AccountRPCEndpoint = "" }},
+		{"空 HTTP 地址", func(c *Config) { c.App.HTTPAddr = "" }},
+		{"空 JWT 密钥", func(c *Config) { c.App.JWTSecret = "" }},
+		{"Environment 非法", func(c *Config) { c.Environment = "staging" }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig()
+			tc.mutate(c)
+			fatal := c.FatalIssues()
+			if len(fatal) == 0 {
+				t.Fatalf("配置 %s 应产生致命问题", tc.name)
+			}
+		})
+	}
+}
+
+// TestOptionalComponentsOnlyWarn 验证非必要组件缺失不阻断启动。
+//
+// 这是可用性与正确性之间的取舍：缓存与消息队列不可用时服务仍能接受请求，
+// 只是推送链路断开、序号分配不可用。若把它们也设为硬依赖，
+// 任何一个非关键组件抖动都会演变成整个服务不可用。
+func TestOptionalComponentsOnlyWarn(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"无缓存地址", func(c *Config) { c.Cache.Addrs = nil }},
+		{"空 gRPC 地址", func(c *Config) { c.App.GRPCAddr = "" }},
+		{"空 MQ 类型", func(c *Config) { c.MQ.Type = "" }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig()
+			tc.mutate(c)
+
+			if fatal := c.FatalIssues(); len(fatal) != 0 {
+				t.Fatalf("配置 %s 不应产生致命问题，得到: %+v", tc.name, fatal)
+			}
+
+			// 但必须产生告警，否则配置疏漏会被彻底静默
+			var warned bool
+			for _, i := range c.Check() {
+				if !i.IsFatal() {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Fatalf("配置 %s 应当产生告警", tc.name)
+			}
+		})
+	}
+}
+
+// TestCheckReportsAllIssuesAtOnce 验证一次列出全部问题。
+//
+// 逐项检查最怕「改一个、重启一次、又报下一个」，
+// 一次性列全可以让部署配置一次改对。
+func TestCheckReportsAllIssuesAtOnce(t *testing.T) {
+	c := validConfig()
+	c.DB = DB{MaxOpenConns: 100}  // 缺数据库
+	c.Cache.Addrs = nil           // 缺缓存
+	c.App.AccountRPCEndpoint = "" // 缺账号中心
+	c.App.GRPCAddr = ""           // 缺 gRPC 地址
+
+	issues := c.Check()
+	if len(issues) < 4 {
+		t.Fatalf("应一次列出至少 4 个问题，实际 %d 个: %+v", len(issues), issues)
 	}
 }
 

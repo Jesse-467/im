@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/json"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/Jesse-467/im/Chat/internal/errs"
@@ -17,7 +19,7 @@ type messageGroupInfoListReq struct{}
 // 旧字段 groupId / aliasName / avatarUrl / lastMsg 全部保留且含义不变，
 // 另外补充了新契约需要的 conversationId、type、未读数等字段。
 type conversationItemDTO struct {
-	ConversationID int64  `json:"conversationId"`
+	ConversationID ID     `json:"conversationId"`
 	GroupID        string `json:"groupId"`
 	// 1 单聊 2 群聊
 	Type int32 `json:"type"`
@@ -53,7 +55,7 @@ func (s *ChatService) HTTPMessageGroupInfoList(c *gin.Context) {
 	list := make([]conversationItemDTO, 0, len(items))
 	for _, it := range items {
 		list = append(list, conversationItemDTO{
-			ConversationID: it.Conversation.ID,
+			ConversationID: ID(it.Conversation.ID),
 			GroupID:        groupIDOf(it.Conversation.ID),
 			Type:           it.Conversation.Type,
 			Name:           it.Conversation.Name,
@@ -70,24 +72,63 @@ func (s *ChatService) HTTPMessageGroupInfoList(c *gin.Context) {
 
 // ── 创建群聊 ────────────────────────────────────────────────────────────────
 
+// memberIDList 是成员 ID 列表，元素同时接受 JSON 数字与字符串。
+//
+// 用自定义切片类型而不是 []int64：雪花 ID 超出前端安全整数范围后，
+// 客户端通常会把 ID 当字符串传递，若只接受数字会导致整个请求解码失败。
+// 而「建群时少传了一个成员」这类问题很难从错误信息里看出来。
+type memberIDList []ID
+
+// UnmarshalJSON 逐个元素兼容数字与字符串形式。
+func (l *memberIDList) UnmarshalJSON(data []byte) error {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(data, &raws); err != nil {
+		return err
+	}
+	out := make(memberIDList, 0, len(raws))
+	for _, raw := range raws {
+		var id ID
+		if err := id.UnmarshalJSON(raw); err != nil {
+			return err
+		}
+		if id > 0 {
+			out = append(out, id)
+		}
+	}
+	*l = out
+	return nil
+}
+
+// int64s 转换为业务层使用的 int64 切片。
+func (l memberIDList) int64s() []int64 {
+	if len(l) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(l))
+	for _, v := range l {
+		out = append(out, int64(v))
+	}
+	return out
+}
+
 type createGroupChatReq struct {
 	GroupName string `json:"groupName"`
 	// 初始成员，可不传
-	MemberIDs []int64 `json:"memberIds"`
+	MemberIDs memberIDList `json:"memberIds"`
 	// 兼容旧客户端的历史字段名
-	ToUID []int64 `json:"toUid"`
+	ToUID memberIDList `json:"toUid"`
 }
 
 // members 返回初始成员列表。
 func (r createGroupChatReq) members() []int64 {
 	if len(r.MemberIDs) > 0 {
-		return r.MemberIDs
+		return r.MemberIDs.int64s()
 	}
-	return r.ToUID
+	return r.ToUID.int64s()
 }
 
 type createGroupChatResp struct {
-	ConversationID int64  `json:"conversationId"`
+	ConversationID ID     `json:"conversationId"`
 	GroupID        string `json:"groupId"`
 	// 实际成功加入的成员数（不含创建者），便于调用方感知无效成员被跳过
 	AddedCount int32 `json:"addedCount"`
@@ -113,7 +154,7 @@ func (s *ChatService) HTTPCreateGroupChat(c *gin.Context) {
 	}
 
 	httpx.OK(c, createGroupChatResp{
-		ConversationID: conv.ID,
+		ConversationID: ID(conv.ID),
 		GroupID:        groupIDOf(conv.ID),
 		AddedCount:     int32(added),
 	})
@@ -124,16 +165,16 @@ func (s *ChatService) HTTPCreateGroupChat(c *gin.Context) {
 type addGroupChatReq struct {
 	conversationRef
 	// 支持两种字段名：新的 userIds 与旧的 toUid
-	UserIDs []int64 `json:"userIds"`
-	ToUID   []int64 `json:"toUid"`
+	UserIDs memberIDList `json:"userIds"`
+	ToUID   memberIDList `json:"toUid"`
 }
 
 // members 返回要加入的成员列表。
 func (r addGroupChatReq) members() []int64 {
 	if len(r.UserIDs) > 0 {
-		return r.UserIDs
+		return r.UserIDs.int64s()
 	}
-	return r.ToUID
+	return r.ToUID.int64s()
 }
 
 type addGroupChatResp struct {
@@ -175,7 +216,7 @@ type groupUserListReq struct {
 }
 
 type groupUserListResp struct {
-	List []int64 `json:"list"`
+	List []ID `json:"list"`
 }
 
 // HTTPGroupUserList 处理 POST /api/group/group_user_list
@@ -202,7 +243,7 @@ func (s *ChatService) HTTPGroupUserList(c *gin.Context) {
 		httpx.Fail(c, toErrs(err))
 		return
 	}
-	httpx.OK(c, groupUserListResp{List: ids})
+	httpx.OK(c, groupUserListResp{List: idsOf(ids)})
 }
 
 // ── 群成员详情 ──────────────────────────────────────────────────────────────
@@ -214,7 +255,7 @@ type memberListReq struct {
 }
 
 type groupMemberDTO struct {
-	UserID    int64  `json:"userId"`
+	UserID    ID     `json:"userId"`
 	NickName  string `json:"nickName"`
 	AvatarUrl string `json:"avatarUrl"`
 	AliasName string `json:"aliasName"`
@@ -261,7 +302,7 @@ func (s *ChatService) HTTPGroupMemberList(c *gin.Context) {
 	list := make([]groupMemberDTO, 0, len(details))
 	for _, d := range details {
 		item := groupMemberDTO{
-			UserID:      d.Member.UserID,
+			UserID:      ID(d.Member.UserID),
 			AliasName:   d.Member.AliasName,
 			Role:        d.Member.Role,
 			LastReadSeq: d.Member.LastReadSeq,

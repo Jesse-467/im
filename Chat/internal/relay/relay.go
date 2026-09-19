@@ -27,6 +27,19 @@ const (
 	// publishTimeout 单条事件的投递超时
 	publishTimeout = 5 * time.Second
 
+	// reclaimInterval 是「回收超时投递」的检查间隔。
+	//
+	// 不需要每轮都做：滞留只可能由进程被强杀造成，属于低频事件，
+	// 秒级延迟完全可以接受，而每轮都扫会白白增加数据库压力。
+	reclaimInterval = 30 * time.Second
+
+	// deliveringLease 是「投递中」状态的租约时长。
+	//
+	// 取值需显著大于单条投递超时（publishTimeout）：若接近甚至小于它，
+	// 正常的慢投递会被误判为滞留，从而被重复投递。
+	// 这里取 1 分钟，是单条超时的 12 倍，留足了余量。
+	deliveringLease = time.Minute
+
 	// maxRetry 最大重试次数，超过后标记为失败（死信），等待人工介入
 	maxRetry = 10
 	// baseBackoff 是重试退避的基准间隔。
@@ -57,16 +70,23 @@ func New(outbox biz.OutboxRepo, publisher mq.Publisher, logger klog.Logger) *Rel
 //
 // 由 Kratos 应用生命周期驱动：随服务启动而启动，随优雅退出而停止。
 func (r *Relay) Run(ctx context.Context) {
-	r.log.Infow("msg", "Outbox 投递协程已启动", "batchSize", batchSize)
+	r.log.Infow("msg", "Outbox 投递协程已启动",
+		"batchSize", batchSize, "deliveringLease", deliveringLease.String())
 
 	timer := time.NewTimer(idleInterval)
 	defer timer.Stop()
+
+	// 回收计时器：与投递循环共用同一个 select，避免为它单开一个协程。
+	reclaimTicker := time.NewTicker(reclaimInterval)
+	defer reclaimTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			r.log.Infow("msg", "Outbox 投递协程已停止")
 			return
+		case <-reclaimTicker.C:
+			r.reclaim(ctx)
 		case <-timer.C:
 			n := r.poll(ctx)
 
@@ -77,6 +97,26 @@ func (r *Relay) Run(ctx context.Context) {
 			}
 			timer.Reset(interval)
 		}
+	}
+}
+
+// reclaim 回收滞留的「投递中」事件。
+//
+// 必要性：投递前把事件置为「投递中」是为了杜绝重复投递，
+// 但若实例在投递途中被强杀，该事件会永远停在投递中。
+// 没有这一步，「不重复」就会以「可能丢失」为代价——而丢失更难补救。
+func (r *Relay) reclaim(ctx context.Context) {
+	n, err := r.outbox.ReclaimStale(ctx, deliveringLease, batchSize)
+	if err != nil {
+		// 回收失败不影响投递主流程，等下一个周期再试
+		r.log.Errorw("msg", "回收滞留的投递中事件失败", "err", err)
+		return
+	}
+	if n > 0 {
+		// 正常情况下这条日志不应出现；一旦出现说明有实例被强杀过，
+		// 值得关注（可能导致该批消息被重复推送，由消费端幂等消化）。
+		r.log.Warnw("msg", "已回收滞留的投递中事件，将重新投递",
+			"count", n, "lease", deliveringLease.String())
 	}
 }
 
@@ -115,21 +155,27 @@ func (r *Relay) deliver(ctx context.Context, ev *biz.OutboxEvent) {
 	}
 }
 
-// handleFailure 处理投递失败：安排退避重试，超过上限则落地为失败。
+// handleFailure 处理投递失败：安排退避重试，超过上限则落地为死信。
+//
+// 两条路径必须分别落地，否则会出现「日志说有死信、数据库里却还在重试」
+// 这种自相矛盾的状态——排查时会严重误导。
 func (r *Relay) handleFailure(ctx context.Context, ev *biz.OutboxEvent, cause error) {
-	backoff := Backoff(ev.RetryCount)
-
-	if err := r.outbox.MarkFailed(ctx, ev.EventID, cause.Error(), time.Now().Add(backoff)); err != nil {
-		r.log.Errorw("msg", "标记事件投递失败时出错", "eventId", ev.EventID, "err", err)
+	if ev.RetryCount+1 >= maxRetry {
+		// 达到上限：标记为死信，不再自动重试。
+		// 这类事件意味着对应消息在服务端存在但永远不会被推送，
+		// 只能由客户端主动拉取补齐，因此必须告警而不是静默跳过。
+		if err := r.outbox.MarkDead(ctx, ev.EventID, cause.Error()); err != nil {
+			r.log.Errorw("msg", "标记事件为死信时出错", "eventId", ev.EventID, "err", err)
+			return
+		}
+		r.log.Errorw("msg", "事件投递已达最大重试次数，转为死信",
+			"eventId", ev.EventID, "topic", ev.Topic, "retryCount", ev.RetryCount+1, "err", cause)
 		return
 	}
 
-	if ev.RetryCount+1 >= maxRetry {
-		// 达到上限：标记为失败（死信），不再自动重试。
-		// 此时必须告警——这类事件意味着对应消息在服务端存在但永远不会被推送，
-		// 只能由客户端主动拉取补齐。
-		r.log.Errorw("msg", "事件投递已达最大重试次数，转为死信",
-			"eventId", ev.EventID, "topic", ev.Topic, "retryCount", ev.RetryCount+1, "err", cause)
+	backoff := Backoff(ev.RetryCount)
+	if err := r.outbox.MarkFailed(ctx, ev.EventID, cause.Error(), time.Now().Add(backoff)); err != nil {
+		r.log.Errorw("msg", "标记事件投递失败时出错", "eventId", ev.EventID, "err", err)
 		return
 	}
 

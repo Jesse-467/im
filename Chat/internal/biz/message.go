@@ -100,16 +100,33 @@ type OutboxRepo interface {
 	// ctx 中携带的事务句柄，而不是自己新开事务。
 	Append(ctx context.Context, event *OutboxEvent) error
 
-	// FetchPending 取一批待投递事件。
+	// FetchPending 捞取一批待投递事件，并把它们置为「投递中」。
 	//
-	// 实现必须使用 FOR UPDATE SKIP LOCKED，使得多个投递协程/多实例
-	// 可以并行处理而不会互相阻塞，也不会重复捞取同一行。
+	// 实现必须满足两点：
+	//   - 使用 FOR UPDATE SKIP LOCKED，使多个投递协程/多实例可以并行处理，
+	//     既不互相阻塞，也不会重复捞取同一行；
+	//   - 在同一事务内把捞取到的事件标记为「投递中」，否则下一轮轮询会再次
+	//     捞到它们，导致同一条消息被重复投递、进而重复推送给用户。
 	FetchPending(ctx context.Context, limit int) ([]*OutboxEvent, error)
 
-	// MarkDelivered 标记投递成功
+	// ReclaimStale 回收「投递中」但超过租约仍未确认的事件。
+	//
+	// 这是「置为投递中」的必要配套：投递协程被强杀时事件会滞留在投递中，
+	// 没有本方法它将永远不会被重投，等价于消息丢失。
+	// 返回本次回收的条数。
+	ReclaimStale(ctx context.Context, lease time.Duration, limit int) (int, error)
+
+	// MarkDelivered 标记投递成功（投递确认）
 	MarkDelivered(ctx context.Context, eventID string) error
 	// MarkFailed 标记投递失败并安排下次重试
 	MarkFailed(ctx context.Context, eventID, reason string, nextRetryAt time.Time) error
+	// MarkDead 标记为死信，不再自动重试。
+	//
+	// 与 MarkFailed 的区别：MarkFailed 是「这次失败了，过会儿再试」，
+	// 本方法是「重试次数已耗尽，停止自动重试，等人工介入」。
+	// 没有这个终态的话，事件会在 pending 与失败之间无限循环，
+	// 既浪费资源，也让监控失去意义。
+	MarkDead(ctx context.Context, eventID, reason string) error
 }
 
 // MessageRepo 是消息仓储。

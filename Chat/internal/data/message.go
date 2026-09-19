@@ -182,10 +182,19 @@ func (r *messageRepo) LoadMessage(ctx context.Context, conversationID, seq int64
 // ── Outbox ──────────────────────────────────────────────────────────────────
 
 // Outbox 状态
+//
+// 与数据库里的取值一一对应，见 migrations/0001_init.up.sql 的
+// message_outbox.status 注释。新增 delivering 是为了让「已捞取、
+// 尚未确认」与「待投递」区分开，从而在源头杜绝重复投递。
 const (
 	outboxStatusPending   int16 = 0
 	outboxStatusDelivered int16 = 1
 	outboxStatusFailed    int16 = 2
+	// outboxStatusDelivering 表示事件已被某个投递协程捞取、正在投递中。
+	//
+	// 处于该状态的事件不会被再次捞取，因此不会重复投递。
+	// 它的风险是「投递中被强杀导致永久滞留」，由 ReclaimStale 按租约兜底。
+	outboxStatusDelivering int16 = 3
 )
 
 // outboxRepo 是 biz.OutboxRepo 的 GORM 实现。
@@ -213,13 +222,18 @@ func (r *outboxRepo) Append(ctx context.Context, event *biz.OutboxEvent) error {
 	return nil
 }
 
-// FetchPending 取一批到期的待投递事件。
+// FetchPending 捞取一批待投递事件，并把它们置为「投递中」。
 //
-// FOR UPDATE SKIP LOCKED 是多实例安全的关键：它让并发的投递协程各自锁住
-// 不同的行，已被别人锁住的行直接跳过而不是等待。若只用普通查询，
-// 多个实例会捞到同一批事件并重复投递。
+// 关键在于「捞取」与「置为投递中」在同一事务内完成：
+// 若不改状态，下一轮轮询会把同一批事件再捞一遍，导致同一条消息被
+// 重复投递到队列、进而被重复推送给用户。这正是「发送者收到两条推送」
+// 这类问题的根源——修复它靠的不是让消费者去重，而是让生产者不重复投递。
 //
-// 事务在这里是必需的：行锁只在事务内有效。
+// 用 FOR UPDATE SKIP LOCKED 而不是普通加锁：多实例并发捞取时，
+// 每个实例都能跳过已被别人锁住的行，从而各取一批、互不等待。
+//
+// 已处于「投递中」的事件不会在崩溃后被重新捞取（状态已不是 pending），
+// 因此需要 relay 侧的租约超时回收机制来兜底，见 ReclaimStale。
 func (r *outboxRepo) FetchPending(ctx context.Context, limit int) ([]*biz.OutboxEvent, error) {
 	var events []*biz.OutboxEvent
 
@@ -233,9 +247,14 @@ func (r *outboxRepo) FetchPending(ctx context.Context, limit int) ([]*biz.Outbox
 			Find(&rows).Error; err != nil {
 			return err
 		}
+		if len(rows) == 0 {
+			return nil
+		}
 
+		ids := make([]int64, 0, len(rows))
 		events = make([]*biz.OutboxEvent, 0, len(rows))
 		for i := range rows {
+			ids = append(ids, rows[i].ID)
 			events = append(events, &biz.OutboxEvent{
 				EventID:      rows[i].EventID,
 				Topic:        rows[i].Topic,
@@ -244,7 +263,15 @@ func (r *outboxRepo) FetchPending(ctx context.Context, limit int) ([]*biz.Outbox
 				RetryCount:   rows[i].RetryCount,
 			})
 		}
-		return nil
+
+		// 置为投递中：让重复投递的不可能发生在源头。
+		// 条件里再次限定 status = pending，避免与并发的失败回写互相覆盖。
+		return tx.Model(&messageOutboxModel{}).
+			Where("id IN ? AND status = ?", ids, outboxStatusPending).
+			Updates(map[string]any{
+				"status":     outboxStatusDelivering,
+				"updated_at": time.Now(),
+			}).Error
 	})
 	if err != nil {
 		return nil, fmt.Errorf("data: 捞取待投递事件失败: %w", err)
@@ -252,12 +279,44 @@ func (r *outboxRepo) FetchPending(ctx context.Context, limit int) ([]*biz.Outbox
 	return events, nil
 }
 
-// MarkDelivered 标记事件已投递。
+// ReclaimStale 回收「投递中」但已超时的事件。
+//
+// 「置为投递中」换来了不重复投递，代价是：若实例在投递途中被强杀，
+// 该事件会永远停在投递中、再也不会被捞取——这是消息丢失。
+// 因此必须有一个兜底：超过租约时间仍未确认的，退回 pending 重新投递。
+//
+// 这里偏向「重试」而非「放弃」：at-least-once 语义下，
+// 重复投递由消费端按 (conversationId, seq) 幂等消化，
+// 而漏投递则只能靠客户端拉取补偿，代价更高。
+func (r *outboxRepo) ReclaimStale(ctx context.Context, lease time.Duration, limit int) (int, error) {
+	res := r.data.db.WithContext(ctx).
+		Model(&messageOutboxModel{}).
+		Where("status = ? AND updated_at < ?", outboxStatusDelivering, time.Now().Add(-lease)).
+		Limit(limit).
+		Updates(map[string]any{
+			"status":     outboxStatusPending,
+			"updated_at": time.Now(),
+			"last_error": "投递超时未确认，已回收重投",
+		})
+	if res.Error != nil {
+		return 0, fmt.Errorf("data: 回收超时的投递中事件失败: %w", res.Error)
+	}
+	return int(res.RowsAffected), nil
+}
+
+// MarkDelivered 标记事件已投递（投递确认）。
+//
+// 条件限定 status = delivering：只有真正被本轮捞取的事件才能被确认，
+// 避免迟到的确认把一条已被回收重投的事件又改成已投递，造成漏投递。
 func (r *outboxRepo) MarkDelivered(ctx context.Context, eventID string) error {
 	err := r.data.conn(ctx).
 		Model(&messageOutboxModel{}).
-		Where("event_id = ?", eventID).
-		Updates(map[string]any{"status": outboxStatusDelivered, "last_error": ""}).Error
+		Where("event_id = ? AND status = ?", eventID, outboxStatusDelivering).
+		Updates(map[string]any{
+			"status":     outboxStatusDelivered,
+			"last_error": "",
+			"updated_at": time.Now(),
+		}).Error
 	if err != nil {
 		return fmt.Errorf("data: 标记事件已投递失败: %w", err)
 	}
@@ -268,6 +327,9 @@ func (r *outboxRepo) MarkDelivered(ctx context.Context, eventID string) error {
 //
 // 同时递增 retry_count，投递方据此计算退避时长；超过上限后
 // 由投递方决定是否转为死信，仓储层不替它做这个决策。
+//
+// 状态退回 pending（而非停在 delivering）：这一轮已经失败，
+// 应当让它在退避时间到达后重新参与投递。
 func (r *outboxRepo) MarkFailed(ctx context.Context, eventID, reason string, nextRetryAt time.Time) error {
 	err := r.data.conn(ctx).
 		Model(&messageOutboxModel{}).
@@ -277,9 +339,30 @@ func (r *outboxRepo) MarkFailed(ctx context.Context, eventID, reason string, nex
 			"retry_count":   gorm.Expr("retry_count + 1"),
 			"last_error":    truncate(reason, 255),
 			"next_retry_at": nextRetryAt,
+			"updated_at":    time.Now(),
 		}).Error
 	if err != nil {
 		return fmt.Errorf("data: 标记事件投递失败时出错: %w", err)
+	}
+	return nil
+}
+
+// MarkDead 标记为死信：重试次数已耗尽，停止自动重试。
+//
+// 同时把 next_retry_at 推到远未来：即使有人误把状态改回 pending，
+// 也不会立刻被捞取，给人工介入留出窗口。
+func (r *outboxRepo) MarkDead(ctx context.Context, eventID, reason string) error {
+	err := r.data.conn(ctx).
+		Model(&messageOutboxModel{}).
+		Where("event_id = ?", eventID).
+		Updates(map[string]any{
+			"status":        outboxStatusFailed,
+			"last_error":    truncate(reason, 255),
+			"next_retry_at": time.Now().Add(100 * 365 * 24 * time.Hour),
+			"updated_at":    time.Now(),
+		}).Error
+	if err != nil {
+		return fmt.Errorf("data: 标记事件为死信失败: %w", err)
 	}
 	return nil
 }

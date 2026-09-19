@@ -62,7 +62,26 @@ type Consumer struct {
 	loader   EventLoader
 	pusher   Pusher
 	log      *klog.Helper
+
+	// dedup 记录本节点最近推送过的 (会话, 序号)。
+	//
+	// 这是「不重复推送」的第二道防线。第一道在 Outbox：捞取即置为投递中，
+	// 从源头避免同一事件被投递两次。但仍有两条路径会产生重复：
+	//   - 投递成功后确认失败（进程崩溃），事件被回收重投；
+	//   - Kafka 的 at-least-once 语义本身允许重复。
+	//
+	// 因此消费端必须幂等。用内存而非 Redis：重复投递几乎总是落在同一节点
+	// （同一分区由同一消费者处理），加一次跨网络查询不值当。
+	dedup *dedupCache
 }
+
+// dedupCapacity 是去重窗口的大小。
+//
+// 取值权衡：窗口太小会让间隔较久的重复投递漏过；太大则占用内存。
+// 这里按「单节点近期活跃会话数 × 每会话少量消息」估算，
+// 覆盖分钟级的重复投递窗口已经足够——更久的重复本就会被客户端
+// 按 (conversationId, seq) 去重。
+const dedupCapacity = 100_000
 
 // New 构造消息消费者。
 func New(
@@ -75,6 +94,7 @@ func New(
 		convRepo: convRepo,
 		loader:   loader,
 		pusher:   pusher,
+		dedup:    newDedupCache(dedupCapacity),
 		log:      klog.NewHelper(klog.With(logger, "module", "consumer")),
 	}
 }
@@ -98,10 +118,23 @@ func (c *Consumer) Handle(ctx context.Context, topic, key string, value []byte) 
 		return nil
 	}
 
+	// 幂等闸门：同一 (会话, 序号) 只推送一次。
+	//
+	// 放在加载消息之前：重复投递时连查询都能省掉。
+	// 注意必须在这条消息真正处理完之后才记录——若先记录后推送、
+	// 而推送中途失败，这条消息就再也不会被重试了，等于人为制造丢消息。
+	if !c.dedup.enter(msgKey(ev.ConversationID, ev.Seq)) {
+		c.log.Infow("msg", "投递事件重复，已跳过",
+			"conversationId", ev.ConversationID, "seq", ev.Seq)
+		return nil
+	}
+
 	// 取出完整消息：事件里只有 ID 与 seq，推送需要完整的消息体
 	// （内容、发送者、时间等）。按会话 + seq 精确查询，走唯一索引，开销可控。
 	msg, err := c.loader.LoadMessage(ctx, ev.ConversationID, ev.Seq)
 	if err != nil {
+		// 加载失败要放行去重键，否则这次失败会让该消息永远无法重推
+		c.dedup.leave(msgKey(ev.ConversationID, ev.Seq))
 		c.log.Errorw("msg", "加载消息失败", "conversationId", ev.ConversationID, "seq", ev.Seq, "err", err)
 		return err
 	}
@@ -172,10 +205,10 @@ func (c *Consumer) buildPushMessage(msg *biz.Message) ws.Message {
 	return ws.Message{
 		Type: ws.TypeMessage,
 		Data: pushPayload{
-			ConversationID: msg.ConversationID,
-			MessageID:      msg.ID,
+			ConversationID: ws.ID(msg.ConversationID),
+			MessageID:      ws.ID(msg.ID),
 			Seq:            msg.Seq,
-			SenderID:       msg.SenderID,
+			SenderID:       ws.ID(msg.SenderID),
 			Type:           msg.Type,
 			Content:        msg.Content,
 			Extra:          msg.Extra,
@@ -186,11 +219,17 @@ func (c *Consumer) buildPushMessage(msg *biz.Message) ws.Message {
 }
 
 // pushPayload 是下行推送的消息体。
+//
+// ID 类字段统一序列化为 JSON 字符串：会话 ID 与消息 ID 是 19 位雪花值，
+// 超出 JavaScript 的 Number.MAX_SAFE_INTEGER，浏览器用 JSON.parse 读会被
+// 静默舍入成另一个数，客户端再回传就会指向不存在的会话。
+// 这里用 ID 类型（见 ws.ID）保证与 HTTP 接口的表示完全一致，
+// 避免同一个 ID 在两条链路上形态不同而让客户端要做两套处理。
 type pushPayload struct {
-	ConversationID int64  `json:"conversationId"`
-	MessageID      int64  `json:"messageId"`
+	ConversationID ws.ID  `json:"conversationId"`
+	MessageID      ws.ID  `json:"messageId"`
 	Seq            int64  `json:"seq"`
-	SenderID       int64  `json:"senderId"`
+	SenderID       ws.ID  `json:"senderId"`
 	Type           int32  `json:"type"`
 	Content        string `json:"content"`
 	Extra          string `json:"extra,omitempty"`

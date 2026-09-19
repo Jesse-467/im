@@ -79,6 +79,48 @@ func (b *bigID) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ID 是对外输出大整数标识时的统一类型。
+//
+// 为什么输出侧也要转成字符串，而不是继续返回数字：
+// 客户端（尤其是浏览器）用 JSON.parse 解析时，19 位雪花 ID 会被静默舍入成
+// 另一个数（...784 变成 ...800）。这类错误没有任何异常可捕获，
+// 只会在后续请求中表现为「会话不存在」「数据为空」，极难定位。
+//
+// 统一序列化为字符串后，客户端拿到什么就能原样回传什么。
+// 注意：输入侧用 bigID，它同时接受字符串与数字，因此老客户端
+// 继续传数字也不会失败。
+type ID int64
+
+// String 便于日志与断言使用。
+func (i ID) String() string { return strconv.FormatInt(int64(i), 10) }
+
+// MarshalJSON 把大整数输出为 JSON 字符串。
+func (i ID) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + strconv.FormatInt(int64(i), 10) + `"`), nil
+}
+
+// UnmarshalJSON 允许该类型也被反序列化（兼容数字与字符串）。
+func (i *ID) UnmarshalJSON(data []byte) error {
+	var b bigID
+	if err := b.UnmarshalJSON(data); err != nil {
+		return err
+	}
+	*i = ID(b)
+	return nil
+}
+
+// idsOf 把一组 int64 转成对外输出的 ID 列表。
+func idsOf(in []int64) []ID {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ID, 0, len(in))
+	for _, v := range in {
+		out = append(out, ID(v))
+	}
+	return out
+}
+
 // groupIDOf 把会话 ID 转换为对外的字符串标识。
 func groupIDOf(conversationID int64) string {
 	return strconv.FormatInt(conversationID, 10)
@@ -87,12 +129,16 @@ func groupIDOf(conversationID int64) string {
 // ── 公共响应结构 ────────────────────────────────────────────────────────────
 
 // chatMsgDTO 对应旧接口的 ChatMsg，字段名与含义保持不变。
+//
+// ID / ConversationID / SenderID 是雪花值，统一用 ID 类型输出为字符串，
+// 避免前端 JSON.parse 的精度丢失。Seq 不是雪花值（会话内递增的小整数），
+// 保持数字类型，便于客户端直接做算术比较。
 type chatMsgDTO struct {
-	ID             int64  `json:"id"`
-	ConversationID int64  `json:"conversationId"`
+	ID             ID     `json:"id"`
+	ConversationID ID     `json:"conversationId"`
 	GroupID        string `json:"groupId"`
 	Seq            int64  `json:"seq"`
-	SenderID       int64  `json:"senderId"`
+	SenderID       ID     `json:"senderId"`
 	Type           int64  `json:"type"`
 	Content        string `json:"content"`
 	Uuid           string `json:"uuid"`
@@ -105,11 +151,11 @@ func toChatMsgDTO(m *biz.Message) *chatMsgDTO {
 		return nil
 	}
 	return &chatMsgDTO{
-		ID:             m.ID,
-		ConversationID: m.ConversationID,
+		ID:             ID(m.ID),
+		ConversationID: ID(m.ConversationID),
 		GroupID:        groupIDOf(m.ConversationID),
 		Seq:            m.Seq,
-		SenderID:       m.SenderID,
+		SenderID:       ID(m.SenderID),
 		Type:           int64(m.Type),
 		Content:        m.Content,
 		Uuid:           m.ClientMsgID,

@@ -10,6 +10,7 @@ package conf
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,11 @@ const (
 	EnvTest = "test"
 	EnvProd = "prod"
 )
+
+// TypeLogFallback 是 MQ_TYPE 未配置时使用的兜底实现名。
+//
+// 它只用于在配置告警里描述实际生效的行为；真正的实现选择在 mq 包内完成。
+const TypeLogFallback = "log"
 
 // weakSecrets 是不允许在生产环境使用的占位密钥。
 var weakSecrets = map[string]struct{}{
@@ -42,6 +48,25 @@ type Config struct {
 	Metrics  Metrics
 	Log      Log
 	App      App
+
+	// degradations 记录「不阻断启动但会削弱能力」的配置问题。
+	//
+	// 装载阶段日志组件尚未就绪，无法直接输出告警，因此先暂存在这里，
+	// 由 main 在初始化日志之后调用 ReportDegradations 输出。
+	degradations []Issue
+}
+
+// Degradations 返回可降级的配置问题。
+func (c *Config) Degradations() []Issue { return c.degradations }
+
+// ReportDegradations 输出可降级配置的告警。
+//
+// 由 main 在日志组件就绪后调用。之所以不在 Load 里直接打日志：
+// 那时 logger 还不存在，只能写标准错误，会绕过统一的日志格式与采集。
+func (c *Config) ReportDegradations(logf func(format string, args ...any)) {
+	for _, i := range c.degradations {
+		logf("配置降级：%s", i.Message)
+	}
 }
 
 // DB 关系型数据库配置。
@@ -273,55 +298,144 @@ func Load() (*Config, error) {
 		},
 	}
 
-	if err := c.Validate(); err != nil {
-		return nil, err
+	// 致命问题立即退出，可降级问题仅记录、由 main 在日志就绪后告警。
+	//
+	// 这样区分的原因：把所有依赖都当成硬依赖，会让任何一个非关键组件
+	// （如缓存、消息队列）的配置疏漏直接演变成整个服务无法启动，
+	// 反而放大了故障面。
+	issues := c.Check()
+	var fatal []Issue
+	for _, i := range issues {
+		if i.IsFatal() {
+			fatal = append(fatal, i)
+		} else {
+			c.degradations = append(c.degradations, i)
+		}
+	}
+	if len(fatal) > 0 {
+		msgs := make([]string, 0, len(fatal))
+		for _, i := range fatal {
+			msgs = append(msgs, i.Message)
+		}
+		return nil, fmt.Errorf("conf: 配置存在致命问题，服务拒绝启动：\n  - %s",
+			strings.Join(msgs, "\n  - "))
 	}
 	return c, nil
 }
 
-// Validate 校验配置的完整性与安全性。
-func (c *Config) Validate() error {
+// 配置问题的严重级别。
+//
+// 区分「致命」与「可降级」的依据是：缺了它服务还能不能提供有价值的服务。
+//   - 数据库、账号中心地址缺失 → 任何业务请求都无法完成，属于致命；
+//   - 缓存、消息队列不可用 → 服务能启动并接受请求，只是能力降级
+//     （如推送链路断开、序号分配退化），应当告警但不阻断启动。
+//
+// 之所以不做成「一律拒绝启动」：把所有依赖都设为硬依赖，会让任何一个
+// 非关键组件抖动都演变成整个服务不可用，反而降低可用性。
+const (
+	LevelFatal = "fatal"
+	LevelWarn  = "warn"
+)
+
+// Issue 是一条配置问题。
+type Issue struct {
+	Level   string
+	Message string
+}
+
+// IsFatal 判断是否为致命问题。
+func (i Issue) IsFatal() bool { return i.Level == LevelFatal }
+
+// Check 逐项检查配置，返回全部问题（不因首个问题而中断）。
+//
+// 一次性返回所有问题而不是遇到第一个就返回：部署时最怕的是
+// 「改一个、重启一次、又报下一个」，逐项列全可以让配置一次改对。
+func (c *Config) Check() []Issue {
+	var issues []Issue
+
+	add := func(level, format string, args ...any) {
+		issues = append(issues, Issue{Level: level, Message: fmt.Sprintf(format, args...)})
+	}
+
+	// ── 致命：缺失后服务无法对外提供任何有意义的服务 ──
+
 	switch c.Environment {
 	case EnvDev, EnvTest, EnvProd:
 	default:
-		return fmt.Errorf("conf: Environment 取值非法 %q，可选 dev|test|prod", c.Environment)
+		add(LevelFatal, "Environment 取值非法 %q，可选 dev|test|prod", c.Environment)
 	}
-
 	if c.ServiceName == "" {
-		return fmt.Errorf("conf: ServiceName 不能为空")
+		add(LevelFatal, "ServiceName 不能为空")
 	}
 	if !c.DB.Configured() {
-		return fmt.Errorf("conf: 数据库未配置，请设置 DB_DSN 或 DB_HOST/DB_NAME")
+		add(LevelFatal, "数据库未配置，请设置 DB_DSN 或 DB_HOST/DB_NAME")
+	} else if c.DB.MaxOpenConns <= 0 {
+		add(LevelFatal, "DB_MAX_OPEN_CONNS 必须大于 0，当前 %d", c.DB.MaxOpenConns)
 	}
-	if c.DB.MaxOpenConns <= 0 {
-		return fmt.Errorf("conf: DB_MAX_OPEN_CONNS 必须大于 0，当前 %d", c.DB.MaxOpenConns)
-	}
-	if len(c.Cache.Addrs) == 0 {
-		return fmt.Errorf("conf: 缓存未配置，请设置 CACHE_ADDRS")
-	}
-	if c.App.HTTPAddr == "" || c.App.GRPCAddr == "" {
-		return fmt.Errorf("conf: HTTP_ADDR 与 GRPC_ADDR 均不能为空")
+	if c.App.HTTPAddr == "" {
+		add(LevelFatal, "HTTP_ADDR 不能为空")
 	}
 	if c.App.JWTSecret == "" {
-		return fmt.Errorf("conf: JWT_SECRET 不能为空")
+		add(LevelFatal, "JWT_SECRET 不能为空")
+	} else if c.App.JWTAccessExpire <= 0 {
+		add(LevelFatal, "JWT_ACCESS_EXPIRE 必须大于 0")
 	}
-	if c.App.JWTAccessExpire <= 0 {
-		return fmt.Errorf("conf: JWT_ACCESS_EXPIRE_SECOND 必须大于 0")
-	}
-	// 账号中心是 Chat 的强依赖（身份信息、好友/资料等能力都要经 gRPC 取用），
-	// 缺失时直接拒绝启动，避免运行时才暴露「调用地址为空」的低级故障。
+	// 账号中心是 Chat 的强依赖：身份资料、好友昵称头像都要经它取用。
+	// 地址为空时任何涉及用户的请求都会失败，因此属于致命。
 	if c.App.AccountRPCEndpoint == "" {
-		return fmt.Errorf("conf: ACCOUNT_RPC_ENDPOINT 不能为空")
+		add(LevelFatal, "ACCOUNT_RPC_ENDPOINT 不能为空")
 	}
 
-	// 生产环境禁止弱密钥，避免把测试配置带上线
+	// ── 致命：生产环境的安全底线 ──
+
 	if c.IsProd() {
 		if _, weak := weakSecrets[c.App.JWTSecret]; weak || len(c.App.JWTSecret) < 32 {
-			return fmt.Errorf("conf: 生产环境 JWT_SECRET 必须是长度不小于 32 的强随机串")
+			add(LevelFatal, "生产环境 JWT_SECRET 必须是长度不小于 32 的强随机串")
 		}
 		if c.DB.Password == "" {
-			return fmt.Errorf("conf: 生产环境 DB_PASSWORD 不能为空")
+			add(LevelFatal, "生产环境 DB_PASSWORD 不能为空")
 		}
 	}
-	return nil
+
+	// ── 可降级：缺失时服务仍可运行，仅相关能力受限 ──
+
+	if len(c.Cache.Addrs) == 0 {
+		add(LevelWarn, "缓存未配置（CACHE_ADDRS 为空）：消息序号分配与在线路由不可用，"+
+			"发送消息将失败，实时推送与跨节点投递不可用")
+	}
+	if c.App.GRPCAddr == "" {
+		add(LevelWarn, "GRPC_ADDR 为空：Chat 暂未对外提供 gRPC 服务，仅影响服务发现注册")
+	}
+	if c.MQ.Type == "" {
+		add(LevelWarn, "MQ_TYPE 为空：按 %q 处理，生产环境必须显式配置为 kafka", TypeLogFallback)
+	}
+
+	return issues
+}
+
+// FatalIssues 返回全部致命问题，供启动时判定是否可以直接退出。
+func (c *Config) FatalIssues() []Issue {
+	var fatal []Issue
+	for _, i := range c.Check() {
+		if i.IsFatal() {
+			fatal = append(fatal, i)
+		}
+	}
+	return fatal
+}
+
+// Validate 校验配置，任一问题（含可降级项）都返回错误。
+//
+// 保留该方法是为了兼容单元测试与「严格模式」调用方；
+// 运行时启动路径请用 Check + FatalIssues，以便把可降级项降为告警。
+func (c *Config) Validate() error {
+	issues := c.Check()
+	if len(issues) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(issues))
+	for _, i := range issues {
+		msgs = append(msgs, fmt.Sprintf("[%s] %s", i.Level, i.Message))
+	}
+	return fmt.Errorf("conf: %s", strings.Join(msgs, "; "))
 }

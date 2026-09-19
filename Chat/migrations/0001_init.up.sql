@@ -234,11 +234,14 @@ CREATE TABLE IF NOT EXISTS message_outbox (
 -- 投递协程只需捞出「待投递且已到期」的行，部分索引让它不被历史数据拖累
 CREATE INDEX IF NOT EXISTS idx_message_outbox_pending
     ON message_outbox (next_retry_at) WHERE status = 0;
+-- 回收滞留事件时按「投递中且已超时」扫描，同样用部分索引限定范围
+CREATE INDEX IF NOT EXISTS idx_message_outbox_delivering
+    ON message_outbox (updated_at) WHERE status = 3;
 -- 失败重试与死信排查
 CREATE INDEX IF NOT EXISTS idx_message_outbox_failed
     ON message_outbox (status, retry_count DESC) WHERE status = 2;
 
 COMMENT ON TABLE  message_outbox               IS '本地消息表，保证落库与投递的原子性';
 COMMENT ON COLUMN message_outbox.partition_key IS '分区键，取会话 ID 以保证同会话消息进入同一分区从而有序';
-COMMENT ON COLUMN message_outbox.status        IS '0 待投递 1 已投递 2 失败';
+COMMENT ON COLUMN message_outbox.status        IS '0 待投递 1 已投递 2 死信 3 投递中';
 COMMENT ON COLUMN message_outbox.last_error    IS '最近一次投递失败原因';

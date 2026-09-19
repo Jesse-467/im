@@ -36,8 +36,8 @@ func (r uploadReq) clientMsgID() string {
 }
 
 type uploadResp struct {
-	ID             int64  `json:"id"`
-	ConversationID int64  `json:"conversationId"`
+	ID             ID     `json:"id"`
+	ConversationID ID     `json:"conversationId"`
 	GroupID        string `json:"groupId"`
 	Seq            int64  `json:"seq"`
 	CreateTime     int64  `json:"createTime"`
@@ -80,8 +80,8 @@ func (s *ChatService) HTTPUpload(c *gin.Context) {
 
 	msg := res.Message
 	httpx.OK(c, uploadResp{
-		ID:             msg.ID,
-		ConversationID: msg.ConversationID,
+		ID:             ID(msg.ID),
+		ConversationID: ID(msg.ConversationID),
 		GroupID:        groupIDOf(msg.ConversationID),
 		Seq:            msg.Seq,
 		CreateTime:     msg.CreatedAt.UnixMilli(),
@@ -237,7 +237,8 @@ func (s *ChatService) HTTPSync(c *gin.Context) {
 
 type recallReq struct {
 	conversationRef
-	MessageID int64 `json:"messageId"`
+	// MessageID 是雪花值，用 bigID 接收以兼容客户端回传的字符串形式
+	MessageID bigID `json:"messageId"`
 }
 
 type recallResp struct {
@@ -263,7 +264,7 @@ func (s *ChatService) HTTPRecall(c *gin.Context) {
 		return
 	}
 
-	if err := s.msgUC.Recall(c.Request.Context(), convID, req.MessageID, uid); err != nil {
+	if err := s.msgUC.Recall(c.Request.Context(), convID, int64(req.MessageID), uid); err != nil {
 		httpx.Fail(c, toErrs(err))
 		return
 	}

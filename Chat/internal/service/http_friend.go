@@ -14,24 +14,25 @@ import (
 //
 // 早期接口用的是 snake_case 的 user_id，新契约统一为 userId。
 // 两种都收，旧客户端在升级期不会因为字段名变化而失败。
+// 取值类型是 bigID，因此 userId 传数字或字符串都能正确解析。
 type addFriendReq struct {
-	UserID int64 `json:"userId"`
+	UserID bigID `json:"userId"`
 	// 兼容旧客户端的历史字段名
-	LegacyUserID int64  `json:"user_id"`
+	LegacyUserID bigID  `json:"user_id"`
 	ApplyMsg     string `json:"applyMsg"`
 }
 
 // target 返回本次要添加的目标用户 ID。
 func (r addFriendReq) target() int64 {
 	if r.UserID > 0 {
-		return r.UserID
+		return int64(r.UserID)
 	}
-	return r.LegacyUserID
+	return int64(r.LegacyUserID)
 }
 
 type addFriendResp struct {
 	// 新契约返回申请 ID，便于客户端后续查询或撤销
-	RequestID int64 `json:"requestId"`
+	RequestID ID `json:"requestId"`
 	// 双方已是好友时为 true，此时不会产生新申请
 	AlreadyFriends bool `json:"alreadyFriends"`
 }
@@ -57,7 +58,7 @@ func (s *ChatService) HTTPAddFriend(c *gin.Context) {
 
 	resp := addFriendResp{AlreadyFriends: already}
 	if ftReq != nil {
-		resp.RequestID = ftReq.ID
+		resp.RequestID = ID(ftReq.ID)
 	}
 	httpx.OK(c, resp)
 }
@@ -65,15 +66,15 @@ func (s *ChatService) HTTPAddFriend(c *gin.Context) {
 // ── 处理好友申请 ────────────────────────────────────────────────────────────
 
 type handleFriendReq struct {
-	// 新契约：直接给申请 ID
-	RequestID int64 `json:"requestId"`
+	// 新契约：直接给申请 ID。用 bigID 兼容客户端回传的字符串形式
+	RequestID bigID `json:"requestId"`
 	// 旧契约：给单聊会话标识，服务端据此反查待处理申请
 	GroupID string `json:"groupId"`
 	IsAgree bool   `json:"isAgree"`
 }
 
 type handleFriendResp struct {
-	ConversationID int64  `json:"conversationId"`
+	ConversationID ID     `json:"conversationId"`
 	GroupID        string `json:"groupId"`
 }
 
@@ -102,7 +103,7 @@ func (s *ChatService) HTTPHandleFriend(c *gin.Context) {
 		return
 	}
 
-	resp := handleFriendResp{ConversationID: convID}
+	resp := handleFriendResp{ConversationID: ID(convID)}
 	if convID > 0 {
 		resp.GroupID = groupIDOf(convID)
 	}
@@ -116,7 +117,7 @@ func (s *ChatService) HTTPHandleFriend(c *gin.Context) {
 // 后者覆盖了用户重复点击申请的场景。
 func (s *ChatService) resolveFriendRequestID(c *gin.Context, uid int64, req handleFriendReq) (int64, error) {
 	if req.RequestID > 0 {
-		return req.RequestID, nil
+		return int64(req.RequestID), nil
 	}
 
 	ctx := c.Request.Context()
@@ -141,7 +142,7 @@ func (s *ChatService) resolveFriendRequestID(c *gin.Context, uid int64, req hand
 // ── 好友列表 ────────────────────────────────────────────────────────────────
 
 type friendItemDTO struct {
-	UserID    int64  `json:"userId"`
+	UserID    ID     `json:"userId"`
 	NickName  string `json:"nickName"`
 	AvatarUrl string `json:"avatarUrl"`
 	Remark    string `json:"remark"`
@@ -166,7 +167,7 @@ func (s *ChatService) HTTPFriendList(c *gin.Context) {
 
 	list := make([]friendItemDTO, 0, len(details))
 	for _, d := range details {
-		item := friendItemDTO{UserID: d.UserID, Remark: d.Remark}
+		item := friendItemDTO{UserID: ID(d.UserID), Remark: d.Remark}
 		if d.Brief != nil {
 			item.NickName = d.Brief.Nickname
 			item.AvatarUrl = d.Brief.AvatarURL
@@ -185,9 +186,9 @@ type friendRequestListReq struct {
 }
 
 type friendRequestDTO struct {
-	ID        int64  `json:"id"`
-	FromUID   int64  `json:"fromUid"`
-	ToUID     int64  `json:"toUid"`
+	ID        ID     `json:"id"`
+	FromUID   ID     `json:"fromUid"`
+	ToUID     ID     `json:"toUid"`
 	ApplyMsg  string `json:"applyMsg"`
 	Status    int32  `json:"status"`
 	CreatedAt int64  `json:"createdAt"`
@@ -226,9 +227,9 @@ func (s *ChatService) HTTPFriendRequestList(c *gin.Context) {
 	list := make([]friendRequestDTO, 0, len(requests))
 	for _, r := range requests {
 		item := friendRequestDTO{
-			ID:        r.ID,
-			FromUID:   r.FromUID,
-			ToUID:     r.ToUID,
+			ID:        ID(r.ID),
+			FromUID:   ID(r.FromUID),
+			ToUID:     ID(r.ToUID),
 			ApplyMsg:  r.ApplyMsg,
 			Status:    r.Status,
 			CreatedAt: r.CreatedAt.UnixMilli(),
