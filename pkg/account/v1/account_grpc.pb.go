@@ -29,6 +29,7 @@ const (
 	AccountService_Register_FullMethodName       = "/account.v1.AccountService/Register"
 	AccountService_Login_FullMethodName          = "/account.v1.AccountService/Login"
 	AccountService_VerifyToken_FullMethodName    = "/account.v1.AccountService/VerifyToken"
+	AccountService_Logout_FullMethodName         = "/account.v1.AccountService/Logout"
 	AccountService_GetUser_FullMethodName        = "/account.v1.AccountService/GetUser"
 	AccountService_BatchGetUsers_FullMethodName  = "/account.v1.AccountService/BatchGetUsers"
 	AccountService_ModifyUserInfo_FullMethodName = "/account.v1.AccountService/ModifyUserInfo"
@@ -42,6 +43,8 @@ type AccountServiceClient interface {
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error)
 	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error)
 	VerifyToken(ctx context.Context, in *VerifyTokenRequest, opts ...grpc.CallOption) (*VerifyTokenResponse, error)
+	// Logout 主动登出：吊销令牌并释放其占用的设备在线位。
+	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
 	GetUser(ctx context.Context, in *GetUserRequest, opts ...grpc.CallOption) (*GetUserResponse, error)
 	BatchGetUsers(ctx context.Context, in *BatchGetUsersRequest, opts ...grpc.CallOption) (*BatchGetUsersResponse, error)
 	ModifyUserInfo(ctx context.Context, in *ModifyUserInfoRequest, opts ...grpc.CallOption) (*ModifyUserInfoResponse, error)
@@ -77,6 +80,15 @@ func (c *accountServiceClient) Login(ctx context.Context, in *LoginRequest, opts
 func (c *accountServiceClient) VerifyToken(ctx context.Context, in *VerifyTokenRequest, opts ...grpc.CallOption) (*VerifyTokenResponse, error) {
 	out := new(VerifyTokenResponse)
 	err := c.cc.Invoke(ctx, AccountService_VerifyToken_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *accountServiceClient) Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error) {
+	out := new(LogoutResponse)
+	err := c.cc.Invoke(ctx, AccountService_Logout_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +138,8 @@ type AccountServiceServer interface {
 	Register(context.Context, *RegisterRequest) (*RegisterResponse, error)
 	Login(context.Context, *LoginRequest) (*LoginResponse, error)
 	VerifyToken(context.Context, *VerifyTokenRequest) (*VerifyTokenResponse, error)
+	// Logout 主动登出：吊销令牌并释放其占用的设备在线位。
+	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
 	GetUser(context.Context, *GetUserRequest) (*GetUserResponse, error)
 	BatchGetUsers(context.Context, *BatchGetUsersRequest) (*BatchGetUsersResponse, error)
 	ModifyUserInfo(context.Context, *ModifyUserInfoRequest) (*ModifyUserInfoResponse, error)
@@ -145,6 +159,9 @@ func (UnimplementedAccountServiceServer) Login(context.Context, *LoginRequest) (
 }
 func (UnimplementedAccountServiceServer) VerifyToken(context.Context, *VerifyTokenRequest) (*VerifyTokenResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method VerifyToken not implemented")
+}
+func (UnimplementedAccountServiceServer) Logout(context.Context, *LogoutRequest) (*LogoutResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Logout not implemented")
 }
 func (UnimplementedAccountServiceServer) GetUser(context.Context, *GetUserRequest) (*GetUserResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetUser not implemented")
@@ -221,6 +238,24 @@ func _AccountService_VerifyToken_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AccountServiceServer).VerifyToken(ctx, req.(*VerifyTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AccountService_Logout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LogoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AccountServiceServer).Logout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AccountService_Logout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AccountServiceServer).Logout(ctx, req.(*LogoutRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -315,6 +350,10 @@ var AccountService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "VerifyToken",
 			Handler:    _AccountService_VerifyToken_Handler,
+		},
+		{
+			MethodName: "Logout",
+			Handler:    _AccountService_Logout_Handler,
 		},
 		{
 			MethodName: "GetUser",

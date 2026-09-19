@@ -45,12 +45,21 @@ message RegisterResponse {
 message LoginRequest {
   string email = 1;
   string password = 2;
+  // device_id 由客户端生成并持久化，用于表达「同一台设备」。
+  // 同一设备重新登录会复用同一行令牌记录，不会自己占用新的在线位。
+  // 留空时服务端退回用令牌标识区分设备（等价于每次登录都算一台新设备）。
+  string device_id = 3;
+  // platform 是客户端平台标识（web / ios / android），仅用于展示与排障。
+  string platform = 4;
 }
 
 message LoginResponse {
   int64 user_id = 1;
   string access_token = 2;
   int64 access_expire = 3; // 有效期，单位秒
+  // evicted_devices 是本次登录因超出设备数上限而被踢下线的设备标识。
+  // 为空表示没有设备被踢。客户端可据此提示用户「你已在其他设备退出登录」。
+  repeated string evicted_devices = 4;
 }
 
 message VerifyTokenRequest {
@@ -61,6 +70,16 @@ message VerifyTokenResponse {
   bool valid = 1;
   int64 user_id = 2;
   int64 expire_at = 3; // Unix 秒
+}
+
+message LogoutRequest {
+  string access_token = 1;
+  // device_id 与登录时保持一致，用于释放该设备占用的在线位
+  string device_id = 2;
+}
+
+message LogoutResponse {
+  bool success = 1;
 }
 
 // ── 用户资料 ────────────────────────────────────────────────────────────────
@@ -112,6 +131,8 @@ service AccountService {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc Login(LoginRequest) returns (LoginResponse);
   rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+  // Logout 主动登出：吊销令牌并释放其占用的设备在线位。
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
 
   rpc GetUser(GetUserRequest) returns (GetUserResponse);
   rpc BatchGetUsers(BatchGetUsersRequest) returns (BatchGetUsersResponse);
