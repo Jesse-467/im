@@ -16,6 +16,7 @@ import (
 	"github.com/Jesse-467/im/Chat/internal/errs"
 	"github.com/Jesse-467/im/Chat/internal/health"
 	"github.com/Jesse-467/im/Chat/internal/httpx"
+	"github.com/Jesse-467/im/Chat/internal/service"
 )
 
 // 编译期断言：Gin 服务必须满足 Kratos 的传输层契约。
@@ -37,12 +38,10 @@ type HTTPServer struct {
 }
 
 // NewHTTPServer 构建 HTTP 服务并注册全部路由。
-//
-// 与 Account 的差异：这里暂时不注入 service（业务层尚未实现），
-// 待 biz/service 落地后再追加参数即可，其他代码无需改动。
 func NewHTTPServer(
 	c *conf.Config,
 	logger klog.Logger,
+	chatSvc *service.ChatService,
 	checkers []health.Checker,
 ) *HTTPServer {
 	if c.IsProd() {
@@ -68,7 +67,7 @@ func NewHTTPServer(
 	}
 
 	s.registerProbes(c, checkers)
-	s.registerRoutes(c)
+	s.registerRoutes(c, chatSvc)
 
 	return s
 }
@@ -110,18 +109,36 @@ func (s *HTTPServer) registerProbes(c *conf.Config, checkers []health.Checker) {
 
 // registerRoutes 注册业务路由。
 //
-// 聊天业务路由将在后续阶段随 biz 层一起接入（会话 / 消息 / 好友 / 群组），
-// 此处仅保留一个占位接口，用于确认服务骨架已能正常对外提供 HTTP 服务。
-func (s *HTTPServer) registerRoutes(c *conf.Config) {
-	s.GET("/api/chat/ping", func(ctx *gin.Context) {
-		httpx.OK(ctx, gin.H{"module": "chat"})
-	})
+// 路径刻意沿用既有接口约定，保证对外功能表现一致；请求与响应字段使用独立的
+// HTTP DTO，与 protobuf 定义解耦，便于两侧各自演进。
+//
+// 全部业务路由统一挂在鉴权中间件下：聊天数据以用户维度隔离，
+// 任何匿名访问都不应被允许。逐个路由决定是否鉴权很容易漏，因此按组统一处理。
+func (s *HTTPServer) registerRoutes(c *conf.Config, svc *service.ChatService) {
+	api := s.Group("/api", requireAuth(c.App.JWTSecret))
+
+	// ── 会话 ──
+	api.POST("/group/message_group_info_list", svc.HTTPMessageGroupInfoList)
+	api.POST("/group/mark_read", svc.HTTPMarkRead)
+
+	// ── 好友 ──
+	api.POST("/group/add_friend", svc.HTTPAddFriend)
+	api.POST("/group/handle_friend", svc.HTTPHandleFriend)
+	api.POST("/friend/list", svc.HTTPFriendList)
+	api.POST("/friend/request_list", svc.HTTPFriendRequestList)
+
+	// ── 群聊 ──
+	api.POST("/group/create_group_chat", svc.HTTPCreateGroupChat)
+	api.POST("/group/add_group_chat", svc.HTTPAddGroupChat)
+	api.POST("/group/group_user_list", svc.HTTPGroupUserList)
+	api.POST("/group/member_list", svc.HTTPGroupMemberList)
+	api.POST("/group/quit", svc.HTTPQuitGroup)
 }
 
 // requireAuth 校验 Authorization 头中的 Bearer 令牌，并把 uid 注入 context。
 //
-// 当前骨架阶段尚无受保护的业务路由，该中间件先作为基础设施就位，
-// 后续业务路由挂载时直接复用，避免各路由重复实现鉴权逻辑。
+// 为什么按路由组统一挂载而不是逐个路由决定：鉴权是"默认拒绝"的语义，
+// 漏挂一个路由就等于开了一个匿名入口，按组处理可以从结构上避免这种疏漏。
 func requireAuth(secret string) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		raw := ctx.GetHeader("Authorization")

@@ -151,6 +151,13 @@ type App struct {
 	// 聊天服务只通过 gRPC 契约消费账号能力（如用户信息查询），
 	// 因此这里保存的是「下游依赖地址」而非本服务的监听地址。
 	AccountRPCEndpoint string
+
+	// NodeID 是雪花 ID 生成器使用的节点号。
+	//
+	// 它描述「本实例是谁」而非某个外部依赖，因此归属 App 而非独立分组；
+	// 取值 0 表示按主机名哈希推导，容器环境下建议显式注入（如取 StatefulSet 序号），
+	// 否则宿主名随机会导致重启后节点号漂移。
+	NodeID int64
 }
 
 // IsProd 是否为生产环境。
@@ -234,6 +241,7 @@ func Load() (*Config, error) {
 			JWTSecret:          envString("JWT_SECRET", ""),
 			JWTAccessExpire:    envDuration("JWT_ACCESS_EXPIRE", 86400*time.Second),
 			AccountRPCEndpoint: envString("ACCOUNT_RPC_ENDPOINT", "127.0.0.1:9001"),
+			NodeID:             int64(envInt("NODE_ID", 0)),
 		},
 	}
 

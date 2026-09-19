@@ -7,9 +7,11 @@
 package main
 
 import (
+	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/conf"
 	"github.com/Jesse-467/im/Chat/internal/data"
 	"github.com/Jesse-467/im/Chat/internal/server"
+	"github.com/Jesse-467/im/Chat/internal/service"
 	"github.com/go-kratos/kratos/v2"
 	"github.com/go-kratos/kratos/v2/log"
 	"time"
@@ -19,22 +21,38 @@ import (
 
 // initApp 的装配实现由 Wire 在编译期生成到 wire_gen.go，运行时零反射开销。
 //
-// 依赖关系完全由各层的 ProviderSet 声明，新增组件只需改动对应的 ProviderSet，
-// 无需手工维护初始化顺序。
-//
-// 与 Account 的差异：骨架阶段没有 biz / service 层，
-// 待业务实现落地后在此追加 biz.ProviderSet 与 service.ProviderSet 即可。
+// 依赖关系完全由各层的 ProviderSet 声明（data → biz → service → server），
+// 新增组件只需改动对应的 ProviderSet，无需手工维护初始化顺序。
 func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 	dataData, cleanup, err := data.NewData(cfg, logger)
 	if err != nil {
 		return nil, nil, err
 	}
+	conversationRepo := data.NewConversationRepo(dataData)
+	messageRepo := data.NewMessageRepo(dataData)
+	userProvider, cleanup2, err := data.NewAccountClient(dataData, cfg, logger)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	idGenerator, err := data.NewIDGenerator(cfg)
+	if err != nil {
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	conversationUseCase := biz.NewConversationUseCase(conversationRepo, messageRepo, userProvider, idGenerator, logger)
+	friendRepo := data.NewFriendRepo(dataData)
+	friendUseCase := biz.NewFriendUseCase(friendRepo, conversationUseCase, userProvider, logger)
+	groupUseCase := biz.NewGroupUseCase(conversationRepo, conversationUseCase, userProvider, idGenerator, logger)
+	chatService := service.NewChatService(conversationUseCase, friendUseCase, groupUseCase, cfg, logger)
 	postgresChecker := data.NewPostgresChecker(dataData)
 	redisChecker := data.NewRedisChecker(dataData)
 	v := data.NewHealthCheckers(postgresChecker, redisChecker)
-	httpServer := server.NewHTTPServer(cfg, logger, v)
+	httpServer := server.NewHTTPServer(cfg, logger, chatService, v)
 	app := newApp(cfg, logger, httpServer)
 	return app, func() {
+		cleanup2()
 		cleanup()
 	}, nil
 }

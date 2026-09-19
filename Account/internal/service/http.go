@@ -53,6 +53,9 @@ type modifyPersonalInfoReq struct {
 type registerResp struct{}
 
 type loginResp struct {
+	// 新增字段：客户端拿到令牌后通常还需要自己的用户 ID 来标识会话，
+	// 返回它可省掉一次资料查询。纯新增，不影响既有客户端。
+	UserId       int64  `json:"userId"`
 	AccessToken  string `json:"accessToken"`
 	AccessExpire int64  `json:"accessExpire"`
 }
@@ -113,6 +116,7 @@ func (s *AccountService) HTTPLogin(c *gin.Context) {
 		return
 	}
 	httpx.OK(c, loginResp{
+		UserId:       resp.GetUserId(),
 		AccessToken:  resp.GetAccessToken(),
 		AccessExpire: resp.GetAccessExpire(),
 	})

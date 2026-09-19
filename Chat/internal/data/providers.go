@@ -8,10 +8,15 @@ import (
 
 // ProviderSet 是 data 层的依赖注入集合。
 //
-// 当前骨架阶段只装配基础设施（DB / 缓存）与健康检查；
-// 会话、消息、好友等仓储实现将在业务层落地时追加到此处。
+// 仓储构造函数的返回类型刻意声明为 biz 层声明的接口：Wire 依据返回类型把实现
+// 绑定到契约上，biz 因此只依赖接口、不 import 本包，更换存储实现无需触碰业务代码。
 var ProviderSet = wire.NewSet(
 	NewData,
+	NewIDGenerator,
+	NewConversationRepo,
+	NewFriendRepo,
+	NewMessageRepo,
+	NewAccountClient,
 	NewPostgresChecker,
 	NewRedisChecker,
 	NewHealthCheckers,
