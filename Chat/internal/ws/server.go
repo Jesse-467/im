@@ -228,12 +228,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.registry.Add(c)
 	s.markOnline(r.Context(), uid)
 
+	s.log.Infow("msg", "WebSocket 连接已建立",
+		"uid", uid, "connId", c.ConnID, "platform", platform,
+		"remote", r.RemoteAddr, "localConns", s.registry.ConnCount())
+
 	// 连接退出时统一做清理，保证任何异常路径都不会遗漏
 	defer func() {
 		c.Close()
 		s.registry.Remove(c)
 		s.markOffline(uid)
 		_ = conn.Close()
+		s.log.Infow("msg", "WebSocket 连接已断开",
+			"uid", uid, "connId", c.ConnID, "platform", platform,
+			"durationMs", time.Since(c.LastActive()).Milliseconds())
 	}()
 
 	// 读写各自独立协程：读协程阻塞等客户端数据，写协程阻塞等下行队列，

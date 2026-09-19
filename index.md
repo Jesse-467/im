@@ -26,7 +26,15 @@
   - [消息功能](#消息功能)
   - [群聊功能](#群聊功能)
   - [WebSocket](#websocket)
+  - [运维探针](#运维探针)
 - [三、业务逻辑与链路解析](#三业务逻辑与链路解析)
+  - [3.1 账号功能（含令牌校验模式与多设备在线上限）](#31-账号功能)
+  - [3.2 好友功能](#32-好友功能)
+  - [3.3 会话功能](#33-会话功能)
+  - [3.4 消息功能](#34-消息功能)
+  - [3.5 群聊功能](#35-群聊功能)
+  - [3.6 WebSocket 实时通信](#36-websocket-实时通信)
+  - [3.7 配置装载与分级校验](#37-配置装载与分级校验)
 - [四、附录](#四附录)
 
 ---
@@ -43,15 +51,21 @@
 | 功能 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- | --- |
 | 注册 | POST | `/api/user/register` | 否 | 邮箱 + 密码创建账号 |
-| 登录 | POST | `/api/user/login` | 否 | 校验凭证并签发 JWT |
+| 登录 | POST | `/api/user/login` | 否 | 校验凭证并签发 JWT，受多设备在线上限约束 |
+| 登出 | POST | `/api/user/logout` | 是 | 吊销当前令牌并释放设备在线位 |
 | 查本人资料 | POST | `/api/user/personal_info` | 是 | 昵称 / 性别 / 头像 / 邮箱 |
 | 查他人资料 | POST | `/api/user/query_user_info` | 是 | 按 `userId` 查询 |
-| 改密码 | POST | `/api/user/reset_password` | 是 | 需校验旧密码 |
+| 改密码 | POST | `/api/user/reset_password` | 是 | 需校验旧密码，成功后吊销全部令牌 |
 | 改资料 | POST | `/api/user/modify_personal_info` | 是 | 昵称 / 性别 / 头像 |
 
 → 详情：[注册](#post-apiuserregister) · [登录](#post-apiuserlogin) ·
+[登出](#post-apiuserlogout) ·
 [本人资料](#post-apiuserpersonal_info) · [他人资料](#post-apiuserquery_user_info) ·
 [改密码](#post-apiuserreset_password) · [改资料](#post-apiusermodify_personal_info)
+
+> **令牌校验有两种模式**（`TOKEN_MODE`）：`self` 只验证 JWT 自身，
+> `db` 还要求数据库中该令牌未被吊销。多设备踢下线依赖 `db` 模式即时生效，
+> 详见 [3.1 令牌校验模式](#令牌校验模式token_mode)。
 
 ### 2. 好友功能
 
@@ -222,12 +236,14 @@
 
 #### POST api-user-login
 
-`POST /api/user/login` —— 校验凭证并签发 JWT。
+`POST /api/user/login` —— 校验凭证并签发 JWT，同时登记设备在线位。
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `email` | string | 是 | 注册时使用的邮箱 |
 | `password` | string | 是 | 明文密码 |
+| `deviceId` | string | 否 | 设备标识，客户端应本地持久化（如首次启动生成的 UUID）。同一设备重新登录不会占用新的在线位 |
+| `platform` | string | 否 | 平台标识（`web` / `ios` / `android`），缺省 `unknown`，仅用于展示与排障 |
 
 **响应**
 
@@ -238,7 +254,8 @@
   "data": {
     "userId": 38,
     "accessToken": "eyJhbGciOiJIUzI1NiIs...",
-    "accessExpire": 1789880990
+    "accessExpire": 1789880990,
+    "evictedDevices": ["d:old-device"]
   }
 }
 ```
@@ -248,9 +265,13 @@
 | `userId` | number | 用户 ID |
 | `accessToken` | string | 后续请求放入 `Authorization: Bearer <token>` |
 | `accessExpire` | number | 过期时间，**Unix 秒** |
+| `evictedDevices` | string[] | 本次登录因超出设备上限被踢下线的设备标识。**无设备被踢时该字段不出现** |
 
 > `userId` 当前是自增整数，不是雪花值；接入历史数据后可能变长，
 > 客户端仍建议按字符串容错处理。
+
+> `evictedDevices` 里的标识形态为 `d:<deviceId>`（客户端上报了 `deviceId`）
+> 或 `j:<jti>`（未上报），后者表示服务端按令牌区分设备。
 
 **错误**
 
@@ -258,6 +279,36 @@
 | --- | --- |
 | `4001` | 邮箱或密码错误（刻意不区分，避免账号枚举） |
 | `4002` | 参数缺失或格式非法 |
+
+#### POST api-user-logout
+
+`POST /api/user/logout` —— 吊销当前令牌并释放其占用的设备在线位。
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `accessToken` | string | 二选一 | 待吊销的令牌 |
+| `deviceId` | string | 否 | 与登录时保持一致，用于释放该设备占用的在线位 |
+
+> 令牌也可以放在 `Authorization: Bearer` 头里（与请求体二选一）。
+> 请求体为空时仅靠头部令牌也能正常工作。
+
+**响应**
+
+```json
+{ "code": 0, "msg": "OK", "data": { "success": true } }
+```
+
+**幂等性**
+
+携带的令牌已经无效（过期 / 已被吊销）时**仍返回成功**。
+这样客户端在令牌自然过期后调登出不会拿到错误、被迫忽略它。
+
+**错误**
+
+| code | 场景 |
+| --- | --- |
+| `4001` | 既没有请求体 `accessToken`，也没有 `Authorization` 头 |
+| `5000` | 吊销时存储故障 |
 
 #### POST api-user-personal_info
 
@@ -1111,9 +1162,13 @@ HTTP 请求
 service.HTTPLogin
   └─▶ biz.UserUseCase.Login
         ├─ repo.FindByEmail → 不存在返回 401
-        ├─ bcrypt.CompareHashAndPassword 校验密码
-        └─▶ auth.Sign(JWT_SECRET, uid, ttl)
-              └─ 签发 HS256 令牌（claims: uid / iat / exp）
+        └─ bcrypt.CompareHashAndPassword 校验密码
+  └─▶ auth.Sign(JWT_SECRET, uid, ttl)
+        └─ 签发 HS256 令牌（claims: uid / jti / iat / exp）
+  └─▶ biz.SessionUseCase.RegisterDevice
+        ├─ ① tokenRepo.Save            → 写 account_token（权威：令牌是否有效）
+        ├─ ② deviceStore.Add           → ZADD im:online:devices:<uid>
+        └─ ③ evictExcess               → 超限则 ZRANGE 取最早的设备并吊销其令牌
 ```
 
 **关键点**
@@ -1123,8 +1178,121 @@ service.HTTPLogin
 - 令牌**显式锁定 HS256**，防止算法混淆攻击（篡改为 `none` 或 `RS256`）。
 - Account 与 Chat 使用**同一个 `JWT_SECRET`**，因此 Account 签发的令牌
   可以直接被 Chat 校验，无需额外的令牌交换。
+- **令牌带 `jti` claim**：它是令牌的唯一标识，数据库只存 `jti` 而不存令牌原文。
+  这样即使 `account_token` 表被读取，也无法据此伪造或复用令牌。
 
-**涉及的表**：`account_user`
+**为什么先落库、再登记设备、最后淘汰**（顺序是不变量）
+
+1. **先写令牌表**：它是「令牌是否有效」的唯一权威。若先登记设备而落库失败，
+   会出现「设备显示在线但令牌根本不存在」的假在线；
+2. **再写有序集合**：记录上线时间，淘汰顺序完全依赖它；
+3. **最后淘汰**：淘汰会产生新的吊销写操作，放在最后避免中途失败留下
+   「已淘汰但未吊销」的不一致。
+
+**降级行为**（都是刻意取舍，不是疏漏）
+
+| 故障 | 行为 | 理由 |
+| --- | --- | --- |
+| 设备登记失败（Redis 不可用） | 登录仍成功，本次不参与上限计数 | 令牌已可用，不应因非关键组件抖动让用户登不进来 |
+| 淘汰过程失败 | 登录仍成功，设备数可能暂时超限 | 由下次登录继续收敛 |
+
+**涉及的表**：`account_user`、`account_token`
+
+#### 登出 `POST /api/user/logout`
+
+**链路**
+
+```
+service.HTTPLogout
+  ├─ 取令牌：请求体 accessToken > Authorization 头
+  └─▶ auth.ParseWithJTI → (uid, jti)
+        └─ 解析失败 → 按「已登出」返回 success=true
+  └─▶ biz.SessionUseCase.Logout
+        ├─ tokenRepo.Revoke(jti, "logout")   → 置 revoked_at
+        └─ deviceStore.Remove                → ZREM 释放在线位
+```
+
+**关键点**
+
+- **令牌已经无效时仍返回成功**：客户端在令牌自然过期后调登出会拿到错误、
+  被迫忽略它，反而让「登出」这件事变得不可靠。
+- **必须同时释放设备在线位**：只吊销不释放的话，登出过的设备会一直占着
+  上限名额，用户会发现自己「没登录任何地方却提示设备数超限」。
+
+**涉及的表**：`account_token`；**涉及的 Redis 键**：`im:online:devices:<uid>`
+
+#### 令牌校验模式（`TOKEN_MODE`）
+
+令牌校验有两种模式，由配置切换。两者**共用同一份 JWT 解析代码**，
+差别只在「是否回查存储」，因此不会出现两套签名校验逻辑各自演化、
+其中一套出漏洞的情况。
+
+| 模式 | 校验内容 | 优点 | 代价 |
+| --- | --- | --- | --- |
+| `self` | 仅 JWT 自身（签名 + `exp`） | 零存储依赖，校验极快，可脱离 DB/Redis 横向扩展 | 令牌在自然过期前**无法提前吊销** |
+| `db` | JWT 自校验 + 数据库中该 `jti` 存在且 `revoked_at` 为空 | 支持即时吊销（踢下线、改密立即生效） | 每次校验多一次存储查询 |
+
+**默认是 `db`**：多设备在线上限依赖「踢出即失效」。
+若默认 `self`，被踢的设备在令牌自然过期前仍能继续使用，
+用户会看到「明明被踢了却还能发消息」。
+
+**返回值的约定**（这一区分很关键）
+
+| 情况 | 返回 | 对外语义 |
+| --- | --- | --- |
+| 签名错 / 过期 / 缺 `uid` | `valid=false`，无 error | `401`，客户端重新登录 |
+| db 模式：`jti` 缺失 / 记录不存在 / 已吊销 | `valid=false`，无 error | `401`，客户端重新登录 |
+| db 模式：**存储查询故障** | `valid=false`，**有 error** | `5000`，服务端故障需告警 |
+
+把「令牌被吊销」也当成 error 返回的话，调用方按 `err != nil` 处理会对外报
+`5000`，把一次正常的重新登录变成服务故障。而存储故障时**必须拒绝放行**
+（fail-closed）：db 模式的语义就是「必须确认未被吊销」，
+放行等于让被踢掉的设备重新获得访问权。
+
+#### 多设备在线上限
+
+**数据结构**
+
+```
+Redis ZSET  key = im:online:devices:<uid>
+            member = device_key   （d:<deviceId> 或 j:<jti>）
+            score  = 上线时间（Unix 毫秒）
+```
+
+**为什么用有序集合**
+
+| 需求 | 有序集合如何满足 |
+| --- | --- |
+| 按上线时间淘汰最早的设备 | 按 score 排序，`ZRANGE 0 n-1` 一次取出最早的一批 |
+| 同一设备重复登录只占一个位置 | 以 member 去重，重新登录只更新 score，不新增成员 |
+
+集合无序、列表无法按时间排序，两者都做不到这两点。
+
+**淘汰流程**
+
+```
+新设备登录
+  └─▶ ZADD（member=device_key, score=now）
+  └─▶ ZRANGE 0 -1 取全部成员 → 数量 > MAX_DEVICES_PER_USER ?
+        └─▶ ZRANGE 0 (超出数-1) 取最早的一批
+              ├─ ZREM 移除在线标记
+              ├─ tokenRepo.FindByDevice → 反查该设备的 jti
+              └─ tokenRepo.Revoke(jti, "evicted") → 令牌立即失效
+```
+
+**每次重新读取规模而不是用「1 + 上次规模」推算**：并发登录（用户在多个端
+同时点登录）时两个请求都会看到超限，按实际规模淘汰能让后到的那次多踢一台，
+最终收敛到上限。
+
+**`deviceId` 的作用**：客户端上报稳定的 `deviceId` 时用它作为 member，
+同一台设备重新登录会覆盖同一个成员，不会自己把自己挤出上限。
+未上报时回落到 `jti`（每次登录算一台新设备），这是更保守的行为——
+宁可多踢，也不要让「不报 `deviceId` 的客户端」无限占用在线位。
+
+**`ONLINE_DEVICE_TTL`**：有序集合本应由登出 / 被踢显式清理，
+但客户端异常退出不会触发清理，长期运行会持续膨胀。
+给一个较长的 TTL（默认 30 天）后长期不活跃的用户会被自然回收，
+而活跃用户每次登录都会续写续期。
 
 #### 本人资料 / 他人资料 `personal_info` · `query_user_info`
 
@@ -1157,9 +1325,22 @@ service.HTTPResetPassword
         ├─ repo.FindByEmail
         ├─ 校验旧密码（bcrypt 比对）
         └─▶ repo.UpdatePassword(新哈希)
+  └─▶ biz.SessionUseCase.RevokeAll(uid, "password_reset")
+        ├─ tokenRepo.RevokeAllByUser → 全部令牌置 revoked_at
+        └─ deviceStore.Clear        → 清空设备在线标记
 ```
 
-**关键点**：必须校验旧密码，因此该接口是**已登录但需二次验证**的语义。
+**关键点**
+
+- 必须校验旧密码，因此该接口是**已登录但需二次验证**的语义。
+- **改密后吊销全部旧令牌**：密码变更意味着「凭据已更换」，
+  旧令牌若继续有效，任何已泄露的令牌都能绕过这次安全操作。
+- **同时清空设备在线标记**：不清空的话，用户改密后重新登录会被旧设备的
+  残留标记判为超限，表现为「刚改完密码，所有端都登不进去」。
+- 吊销失败不回滚密码变更（密码已经改了，报错会让用户以为没改成功），
+  但会记 Error 日志以便告警与人工介入。
+
+**涉及的表**：`account_user`、`account_token`；**涉及的 Redis 键**：`im:online:devices:<uid>`
 
 #### 改资料 `POST /api/user/modify_personal_info`
 
@@ -1854,15 +2035,24 @@ conf.Load()
 
 | 级别 | 判定依据 | 字段 |
 | --- | --- | --- |
-| 致命 | 缺了它服务无法提供任何有意义的服务 | `Environment`、`ServiceName`、DB 连接信息、`HTTP_ADDR`、`JWT_SECRET`、`ACCOUNT_RPC_ENDPOINT`、生产环境的密钥强度与数据库密码 |
-| 可降级 | 服务能启动并接受请求，只是能力受限 | `CACHE_ADDRS`（序号分配与在线路由不可用）、非生产环境使用 `log` 投递 |
+| 致命 | 缺了它服务无法提供任何有意义的服务 | `Environment`、`ServiceName`、DB 连接信息、`HTTP_ADDR`、`JWT_SECRET`、`ACCOUNT_RPC_ENDPOINT`、`TOKEN_MODE` 取值、`MAX_DEVICES_PER_USER` 非负、生产环境的密钥强度与数据库密码 |
+| 可降级 | 服务能启动并接受请求，只是能力受限 | `CACHE_ADDRS`（序号分配与在线路由不可用；Account 侧多设备上限退化为不限制）、非生产环境使用 `log` 投递 |
 
 把所有依赖都设为硬依赖，会让任何一个非关键组件抖动都演变成整个服务不可用，
 反而降低可用性。
 
-**为什么一次列出全部问题**
+**Account 侧的降级项**
 
-部署时最怕「改一个、重启一次、又报下一个」。一次性列全可以让配置一次改对。
+| 配置问题 | 降级表现 |
+| --- | --- |
+| `CACHE_ADDRS` 为空 | 多设备在线上限退化为不限制；被踢设备无法即时失效（`db` 模式仍可用，只是校验全部落到数据库） |
+| `TOKEN_MODE=db` 且缓存为空 | 令牌校验直接查数据库，延迟显著上升（因此单独提示一条告警） |
+
+**为什么 `TOKEN_MODE` 取值错误是致命的**
+
+取值写错会让服务在「以为开启了严格校验」的假设下退化为 `self` 模式，
+被踢下线的设备仍能继续使用——这是**静默的安全降级**，
+比启动失败危险得多，必须在启动时拦住。
 
 **为什么关键字段不给默认值**
 
@@ -1871,6 +2061,14 @@ conf.Load()
 或让降级告警永远不触发。缺省时必须明确报错。
 `DB_PORT`（5432）、`DB_USER`（postgres）保留了默认值——它们有行业通用值，
 给了不会掩盖配置错误。
+
+**运行时可调的业务参数**（Account）
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TOKEN_MODE` | `db` | `self`（仅校验 JWT）/ `db`（还需数据库未吊销） |
+| `MAX_DEVICES_PER_USER` | `3` | 单账号同时在线设备数上限，`0` 表示不限制 |
+| `ONLINE_DEVICE_TTL` | `720h`（30 天） | 设备在线标记（Redis ZSET）的兜底有效期，`0` 表示不过期 |
 
 ---
 
@@ -1882,28 +2080,29 @@ conf.Load()
 | --- | --- | --- | --- | --- |
 | 1 | Account | POST | `/api/user/register` | 账号 |
 | 2 | Account | POST | `/api/user/login` | 账号 |
-| 3 | Account | POST | `/api/user/personal_info` | 账号 |
-| 4 | Account | POST | `/api/user/query_user_info` | 账号 |
-| 5 | Account | POST | `/api/user/reset_password` | 账号 |
-| 6 | Account | POST | `/api/user/modify_personal_info` | 账号 |
-| 7 | Chat | POST | `/api/group/add_friend` | 好友 |
-| 8 | Chat | POST | `/api/group/handle_friend` | 好友 |
-| 9 | Chat | POST | `/api/friend/list` | 好友 |
-| 10 | Chat | POST | `/api/friend/request_list` | 好友 |
-| 11 | Chat | POST | `/api/group/message_group_info_list` | 会话 |
-| 12 | Chat | POST | `/api/group/mark_read` | 会话 |
-| 13 | Chat | POST | `/api/message/upload` | 消息 |
-| 14 | Chat | POST | `/api/message/pull` | 消息 |
-| 15 | Chat | POST | `/api/message/sync` | 消息 |
-| 16 | Chat | POST | `/api/message/recall` | 消息 |
-| 17 | Chat | POST | `/api/group/create_group_chat` | 群聊 |
-| 18 | Chat | POST | `/api/group/add_group_chat` | 群聊 |
-| 19 | Chat | POST | `/api/group/group_user_list` | 群聊 |
-| 20 | Chat | POST | `/api/group/member_list` | 群聊 |
-| 21 | Chat | POST | `/api/group/quit` | 群聊 |
-| 22 | Chat | GET | `/ws` | 实时通信 |
-| 23 | 两者 | GET | `/healthz` | 运维 |
-| 24 | 两者 | GET | `/readyz` | 运维 |
+| 3 | Account | POST | `/api/user/logout` | 账号 |
+| 4 | Account | POST | `/api/user/personal_info` | 账号 |
+| 5 | Account | POST | `/api/user/query_user_info` | 账号 |
+| 6 | Account | POST | `/api/user/reset_password` | 账号 |
+| 7 | Account | POST | `/api/user/modify_personal_info` | 账号 |
+| 8 | Chat | POST | `/api/group/add_friend` | 好友 |
+| 9 | Chat | POST | `/api/group/handle_friend` | 好友 |
+| 10 | Chat | POST | `/api/friend/list` | 好友 |
+| 11 | Chat | POST | `/api/friend/request_list` | 好友 |
+| 12 | Chat | POST | `/api/group/message_group_info_list` | 会话 |
+| 13 | Chat | POST | `/api/group/mark_read` | 会话 |
+| 14 | Chat | POST | `/api/message/upload` | 消息 |
+| 15 | Chat | POST | `/api/message/pull` | 消息 |
+| 16 | Chat | POST | `/api/message/sync` | 消息 |
+| 17 | Chat | POST | `/api/message/recall` | 消息 |
+| 18 | Chat | POST | `/api/group/create_group_chat` | 群聊 |
+| 19 | Chat | POST | `/api/group/add_group_chat` | 群聊 |
+| 20 | Chat | POST | `/api/group/group_user_list` | 群聊 |
+| 21 | Chat | POST | `/api/group/member_list` | 群聊 |
+| 22 | Chat | POST | `/api/group/quit` | 群聊 |
+| 23 | Chat | GET | `/ws` | 实时通信 |
+| 24 | 两者 | GET | `/healthz` | 运维 |
+| 25 | 两者 | GET | `/readyz` | 运维 |
 
 ### 4.2 约束速查
 
@@ -1912,6 +2111,9 @@ conf.Load()
 | 邮箱格式 | 必须合法 | Account 注册 |
 | 密码长度 | 6 ~ 32 | Account 注册 / 改密 |
 | 昵称长度 | ≤ 32 字符 | Account 改资料 |
+| 单账号在线设备数 | 默认 3，`0` 表示不限制 | Account 登录（`MAX_DEVICES_PER_USER`） |
+| 令牌校验模式 | 默认 `db`（需数据库未吊销） | Account 校验（`TOKEN_MODE`） |
+| 设备在线标记 TTL | 默认 720h | Account 登录（`ONLINE_DEVICE_TTL`） |
 | 好友申请附言 | ≤ 100 字符 | Chat 加好友 |
 | 好友申请有效期 | 7 天 | Chat 加好友 |
 | 消息正文长度 | ≤ 4096 字符（按 rune） | Chat 发送消息 |
@@ -1938,6 +2140,18 @@ conf.Load()
 4. 对 `maxSeq > lastReadSeq` 的会话调 `sync` 补齐离线消息；
 5. 之后依赖 WebSocket 推送实时更新。
 
+**多设备接入的必做事项**
+
+1. **首次启动生成并本地持久化 `deviceId`**（UUID 即可），每次登录都带上。
+   不持久化的话，每次登录都会被当成一台新设备，用户会发现
+   「只登录了两次就提示设备数超限」。
+2. **处理 `evictedDevices`**：登录响应里出现该字段说明有其他设备被踢下线。
+   可以提示用户「你已在其他设备退出登录」。
+3. **退出登录时调 `/api/user/logout`**，并带上登录时相同的 `deviceId`；
+   否则该设备会一直占着在线位，直到令牌自然过期。
+4. **收到 `code=4001` 时不要自动重试**：可能是被其他端挤下线了，
+   应引导用户重新登录，而不是循环重连。
+
 **发送消息的推荐做法**
 
 1. 为每条消息生成稳定的 `clientMsgId`（如 UUID）；
@@ -1945,7 +2159,7 @@ conf.Load()
 3. 优先走 WebSocket `send`（延迟更低），网络异常时回退到 HTTP `upload`；
 4. 超时重试时**复用同一个 `clientMsgId`**，服务端会返回原消息而不是新建。
 
-**必须注意的四点**
+**必须注意的五点**
 
 1. **ID 当字符串处理**：19 位雪花 ID 超出 JS 安全整数范围，
    `JSON.parse` 会静默舍入。服务端已全部下发为字符串，客户端不要转成 `Number`。
@@ -1954,6 +2168,7 @@ conf.Load()
    否则会重复返回已读的那条。
 4. **用 seq 判断消息缺失**：收到 `seq=10` 但本地最后一条是 `seq=7`，
    说明漏了 8、9，应调 `sync(fromSeq=7)` 补洞——不要依赖推送的完整性。
+5. **`deviceId` 必须持久化**：见上文「多设备接入的必做事项」。
 
 **重连后的标准流程**
 
@@ -1972,10 +2187,17 @@ conf.Load()
 | 接口返回 200 但数据为空 | 客户端回传的 ID 被 JS 舍入成了另一个值 | 检查是否把 ID 当字符串处理 |
 | 业务报错但 HTTP 状态码是 200 | 这是设计如此：业务结果在响应体的 `code` 里 | 判断 `code` 而非 HTTP 状态码 |
 | 收到 `code=4001` | 令牌过期，或 Account 与 Chat 的 `JWT_SECRET` 不一致 | 对比两服务的 `JWT_SECRET` |
+| 登录后被立刻踢下线 | 是本人其他端登录触发了设备上限 | 看登录响应体的 `evictedDevices`；调大 `MAX_DEVICES_PER_USER` 或让客户端上报稳定的 `deviceId` |
+| 明明只有一台设备却提示超限 | 客户端每次登录都换了新的 `deviceId`（或未上报），每次登录都算一台新设备 | 让客户端持久化 `deviceId`；查 `im:online:devices:<uid>` 的成员数 |
+| 被踢的设备仍能继续发消息 | `TOKEN_MODE=self`，该模式按设计无法提前吊销令牌 | 改为 `TOKEN_MODE=db` |
+| 改密后其他端没掉线 | 吊销全部令牌失败（存储故障） | 搜日志关键词「改密后吊销全部令牌失败」 |
+| 校验令牌报 `5000` | `db` 模式下数据库查询故障（fail-closed 拒绝放行） | 检查 `DB_HOST` 连通性与 `/readyz` |
 | 发送消息报 `5000` | Redis 不可用（序号分配依赖它） | 检查 `CACHE_ADDRS` 与 Redis 连通性 |
 | 消息已发送但对方收不到 | 对方不在任何网关节点上（离线），或推送链路断开 | 查 `message_outbox` 表的状态分布 |
 | 同一条消息推送多次 | Outbox 事件被重复投递 | 查 `message_outbox` 是否有重复 `partition_key` |
 | 群成员列表返回 `4006` | 不是该会话成员 | 确认调用方是否在会话中 |
+| 拉人入群返回 `4006` | 操作者不是群主或管理员 | 权限已收紧为「群主 / 管理员」，普通成员不能拉人 |
+| 拉人入群返回 `4004` | 群成员数将超出 500 上限 | 与 `ErrInvalidParam` 区分开，客户端可据此换策略（如新建群） |
 | 服务启动即退出 | 配置存在致命问题 | 看启动输出，问题会一次列全 |
 
 **排查用的关键 SQL**
@@ -1992,6 +2214,25 @@ WHERE conversation_id = <会话ID> ORDER BY seq;
 -- 检查是否产生了重复的单聊会话（应为 0 行）
 SELECT biz_key, count(*) FROM conversation
 WHERE type = 1 GROUP BY biz_key HAVING count(*) > 1;
+
+-- 某用户当前的令牌状态：被踢的设备 revoked_by = 'evicted'
+SELECT jti, device_id, platform, expire_at, revoked_at, revoked_by
+FROM account_token WHERE user_id = <用户ID> ORDER BY created_at DESC;
+
+-- 每个用户的在线令牌数：应不超过 MAX_DEVICES_PER_USER
+SELECT user_id, count(*) FROM account_token
+WHERE revoked_at IS NULL AND expire_at > now()
+GROUP BY user_id HAVING count(*) > 3;
+```
+
+**排查用的关键 Redis 命令**
+
+```
+# 某用户当前在线的设备及其上线时间（score 为 Unix 毫秒）
+ZRANGE im:online:devices:<用户ID> 0 -1 WITHSCORES
+
+# 有序集合的成员数（应与该用户未吊销的令牌数一致）
+ZCARD im:online:devices:<用户ID>
 ```
 
 ### 4.5 相关文档
@@ -2002,6 +2243,7 @@ WHERE type = 1 GROUP BY biz_key HAVING count(*) > 1;
 | [REFACTOR_PLAN.md](file:///d:/GoCode/IMmessage/im/REFACTOR_PLAN.md) | 重构章程、各阶段验收结果、缺陷修复记录 |
 | [.env.example](file:///d:/GoCode/IMmessage/im/.env.example) | 全量环境变量模板 |
 | [0001_init.up.sql](file:///d:/GoCode/IMmessage/im/Chat/migrations/0001_init.up.sql) | Chat 库建表脚本（含全部约束与注释） |
+| [0002_token.up.sql](file:///d:/GoCode/IMmessage/im/Account/migrations/0002_token.up.sql) | Account 库在线令牌表建表脚本 |
 
 ---
 
@@ -2015,6 +2257,9 @@ WHERE type = 1 GROUP BY biz_key HAVING count(*) > 1;
   需同步更新对应的参数表与响应示例。
 - 修改 `internal/biz/` 中的约束常量（如长度上限）时，
   需同步更新 [4.2 约束速查](#42-约束速查)。
+- 修改 `internal/conf/` 中的环境变量（新增、改默认值、改校验级别）时，
+  需同步更新 [3.7 配置装载与分级校验](#37-配置装载与分级校验) 与
+  [.env.example](file:///d:/GoCode/IMmessage/im/.env.example)。
 - 架构层面的变更请改 [README.md](file:///d:/GoCode/IMmessage/im/README.md)，
   本文档只关注接口与链路。
 

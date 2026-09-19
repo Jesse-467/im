@@ -6,6 +6,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -27,6 +29,13 @@ type Token struct {
 	AccessToken string
 	// ExpireAt 为过期时间（Unix 秒）
 	ExpireAt int64
+	// JTI 是令牌的唯一标识（JWT 的 jti claim）。
+	//
+	// 为什么需要它：令牌本身很长且包含签名，若直接把它当数据库主键，
+	// 既浪费存储又把凭证暴露给任何能读该表的人。用随机 ID 作为替身，
+	// 数据库只存 jti，校验时从 JWT 里取出 jti 去比对，同样能表达
+	// 「这个令牌是否被吊销」，且没有泄露风险。
+	JTI string
 }
 
 // Sign 为指定用户签发访问令牌。
@@ -41,8 +50,14 @@ func Sign(secret string, userID int64, ttl time.Duration) (*Token, error) {
 	now := time.Now()
 	expireAt := now.Add(ttl)
 
+	jti, err := newJTI()
+	if err != nil {
+		return nil, fmt.Errorf("auth: 生成令牌标识失败: %w", err)
+	}
+
 	claims := jwt.MapClaims{
 		"uid": userID,
+		"jti": jti,
 		"iat": now.Unix(),
 		"exp": expireAt.Unix(),
 	}
@@ -53,15 +68,24 @@ func Sign(secret string, userID int64, ttl time.Duration) (*Token, error) {
 		return nil, fmt.Errorf("auth: 签发令牌失败: %w", err)
 	}
 
-	return &Token{AccessToken: signed, ExpireAt: expireAt.Unix()}, nil
+	return &Token{AccessToken: signed, ExpireAt: expireAt.Unix(), JTI: jti}, nil
 }
 
 // Parse 校验访问令牌并返回用户 ID。
 //
 // 显式锁定签名算法为 HS256，防止算法混淆攻击（如篡改为 none 或 RS256）。
 func Parse(secret, tokenString string) (userID int64, expireAt int64, err error) {
+	uid, _, expireAt, err := ParseWithJTI(secret, tokenString)
+	return uid, expireAt, err
+}
+
+// ParseWithJTI 校验访问令牌并同时返回 jti。
+//
+// 与 Parse 分开而不是直接改签名：Chat 服务也依赖 Parse（它编不出
+// Account 的令牌、也不需要 jti），保持原签名可以让两侧互不影响。
+func ParseWithJTI(secret, tokenString string) (userID int64, jti string, expireAt int64, err error) {
 	if tokenString == "" {
-		return 0, 0, ErrMissingToken
+		return 0, "", 0, ErrMissingToken
 	}
 
 	claims := jwt.MapClaims{}
@@ -72,7 +96,7 @@ func Parse(secret, tokenString string) (userID int64, expireAt int64, err error)
 		return []byte(secret), nil
 	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
 	if err != nil {
-		return 0, 0, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return 0, "", 0, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 
 	switch v := claims["uid"].(type) {
@@ -83,16 +107,33 @@ func Parse(secret, tokenString string) (userID int64, expireAt int64, err error)
 	case int:
 		userID = int64(v)
 	default:
-		return 0, 0, fmt.Errorf("%w: uid claim 缺失或类型不正确", ErrInvalidToken)
+		return 0, "", 0, fmt.Errorf("%w: uid claim 缺失或类型不正确", ErrInvalidToken)
 	}
 	if userID <= 0 {
-		return 0, 0, fmt.Errorf("%w: uid 非法", ErrInvalidToken)
+		return 0, "", 0, fmt.Errorf("%w: uid 非法", ErrInvalidToken)
 	}
+
+	// jti 缺失不视为令牌无效：它只影响「能否被吊销」，
+	// 而 TokenMode=self 下本就不需要它。由调用方按模式决定是否要求非空。
+	jti, _ = claims["jti"].(string)
 
 	if exp, ok := claims["exp"].(float64); ok {
 		expireAt = int64(exp)
 	}
-	return userID, expireAt, nil
+	return userID, jti, expireAt, nil
+}
+
+// newJTI 生成一个随机且唯一的令牌标识。
+//
+// 用 128 位随机数而非自增序列：jti 会出现在令牌里，可预测的序列
+// 会让攻击者有机会猜测其他令牌的标识。随机值不携带任何规律。
+func newJTI() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	// 输出为 32 位十六进制：无需第三方 UUID 依赖，长度也在列宽内
+	return hex.EncodeToString(b[:]), nil
 }
 
 // WithUserID 把用户 ID 写入 context。

@@ -63,6 +63,8 @@ func (uc *GroupUseCase) CreateGroup(ctx context.Context, ownerID int64, name str
 	}
 	name = strings.TrimSpace(name)
 	if name == "" || len([]rune(name)) > groupNameMaxLen {
+		uc.log.Warnw("msg", "群名不合法",
+			"owner", ownerID, "nameLen", len([]rune(name)), "max", groupNameMaxLen)
 		return nil, 0, ErrInvalidParam
 	}
 
@@ -90,7 +92,9 @@ func (uc *GroupUseCase) CreateGroup(ctx context.Context, ownerID int64, name str
 		members = append(members, &ConversationMember{UserID: uid, Role: MemberRoleMember})
 	}
 	if len(members) > groupMaxMembers {
-		return nil, 0, ErrInvalidParam
+		uc.log.Warnw("msg", "建群时成员数超出上限",
+			"owner", ownerID, "members", len(members), "max", groupMaxMembers)
+		return nil, 0, ErrGroupMemberLimitExceeded
 	}
 
 	conv := &Conversation{
@@ -114,21 +118,29 @@ func (uc *GroupUseCase) CreateGroup(ctx context.Context, ownerID int64, name str
 
 // AddMembers 向群聊添加成员。
 //
-// 操作者必须是群成员；已在群内的用户会被跳过，返回实际新增人数，因此重复调用是幂等的。
+// 操作者必须是群成员且具备管理权限；已在群内的用户会被跳过，
+// 返回实际新增人数，因此重复调用是幂等的。
+//
+// 权限收紧到「群主 / 管理员」而非「任意成员」：拉人会把被拉者的名字
+// 暴露给全群，并让其收到后续消息，属于对他人有影响的动作。
+// 若任何成员都能拉人，一个普通成员就能把无关的人塞进企业群。
 func (uc *GroupUseCase) AddMembers(ctx context.Context, conversationID, operatorID int64, userIDs []int64) (int, error) {
 	if conversationID <= 0 || len(userIDs) == 0 {
 		return 0, ErrInvalidParam
 	}
-	if _, err := uc.mustBeMember(ctx, conversationID, operatorID); err != nil {
+	operator, err := uc.mustBeMember(ctx, conversationID, operatorID)
+	if err != nil {
 		return 0, err
+	}
+	if operator.Role != MemberRoleOwner && operator.Role != MemberRoleAdmin {
+		uc.log.Warnw("msg", "无权限拉人入群",
+			"conversationId", conversationID, "operator", operatorID, "role", operator.Role)
+		return 0, ErrNoPermission
 	}
 
 	existing, err := uc.convRepo.ListMembers(ctx, conversationID)
 	if err != nil {
 		return 0, err
-	}
-	if len(existing)+len(userIDs) > groupMaxMembers {
-		return 0, ErrInvalidParam
 	}
 
 	seen := make(map[int64]struct{}, len(existing))
@@ -154,12 +166,22 @@ func (uc *GroupUseCase) AddMembers(ctx context.Context, conversationID, operator
 		return 0, nil
 	}
 
+	// 上限校验放在去重之后：用「现有 + 本次真实新增」判断，
+	// 否则重复传入已在群内的 ID 会被误判为超限。
+	if len(existing)+len(members) > groupMaxMembers {
+		uc.log.Warnw("msg", "群成员数将超出上限",
+			"conversationId", conversationID,
+			"existing", len(existing), "adding", len(members), "max", groupMaxMembers)
+		return 0, ErrGroupMemberLimitExceeded
+	}
+
 	added, err := uc.convRepo.AddMembers(ctx, conversationID, members)
 	if err != nil {
 		return 0, err
 	}
 
-	uc.log.Infow("msg", "群成员已新增", "conversationId", conversationID, "operator", operatorID, "added", added)
+	uc.log.Infow("msg", "群成员已新增",
+		"conversationId", conversationID, "operator", operatorID, "added", added)
 	return added, nil
 }
 
@@ -170,25 +192,43 @@ func (uc *GroupUseCase) RemoveMember(ctx context.Context, conversationID, operat
 		return err
 	}
 	if operator.Role != MemberRoleOwner && operator.Role != MemberRoleAdmin {
+		uc.log.Warnw("msg", "无权限移除群成员",
+			"conversationId", conversationID, "operator", operatorID, "role", operator.Role)
 		return ErrNoPermission
 	}
 	if operatorID == targetID {
+		uc.log.Warnw("msg", "尝试移除自己",
+			"conversationId", conversationID, "operator", operatorID)
 		return ErrInvalidParam
 	}
 
 	target, err := uc.convRepo.FindMember(ctx, conversationID, targetID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询待移除成员失败",
+			"conversationId", conversationID, "targetId", targetID, "err", err)
 		return err
 	}
 	if target == nil {
+		uc.log.Warnw("msg", "待移除的对象不是群成员",
+			"conversationId", conversationID, "targetId", targetID)
 		return ErrNotConversationMember
 	}
 	// 群主不能被移除，否则群会失去所有者
 	if target.Role == MemberRoleOwner {
+		uc.log.Warnw("msg", "尝试移除群主被拒",
+			"conversationId", conversationID, "operator", operatorID, "targetId", targetID)
 		return ErrCannotRemoveOwner
 	}
 
-	return uc.convRepo.RemoveMember(ctx, conversationID, targetID)
+	if err := uc.convRepo.RemoveMember(ctx, conversationID, targetID); err != nil {
+		uc.log.Errorw("msg", "移除群成员失败",
+			"conversationId", conversationID, "operator", operatorID,
+			"targetId", targetID, "err", err)
+		return err
+	}
+	uc.log.Infow("msg", "群成员已被移除",
+		"conversationId", conversationID, "operator", operatorID, "targetId", targetID)
+	return nil
 }
 
 // QuitGroup 退出群聊。
@@ -201,9 +241,17 @@ func (uc *GroupUseCase) QuitGroup(ctx context.Context, conversationID, userID in
 		return err
 	}
 	if member.Role == MemberRoleOwner {
+		uc.log.Warnw("msg", "群主尝试退群被拒",
+			"conversationId", conversationID, "uid", userID)
 		return ErrGroupOwnerCannotQuit
 	}
-	return uc.convRepo.RemoveMember(ctx, conversationID, userID)
+	if err := uc.convRepo.RemoveMember(ctx, conversationID, userID); err != nil {
+		uc.log.Errorw("msg", "退出群聊失败",
+			"conversationId", conversationID, "uid", userID, "err", err)
+		return err
+	}
+	uc.log.Infow("msg", "用户已退出群聊", "conversationId", conversationID, "uid", userID)
+	return nil
 }
 
 // UpdateGroupInfo 更新群资料，或更新自己在群内的昵称。
@@ -216,11 +264,18 @@ func (uc *GroupUseCase) UpdateGroupInfo(ctx context.Context, conversationID, ope
 	// 备注名是成员维度的属性，任何人都可以改自己的
 	if alias := strings.TrimSpace(aliasName); alias != "" {
 		if len([]rune(alias)) > 32 {
+			uc.log.Warnw("msg", "群内昵称超长",
+				"conversationId", conversationID, "uid", operatorID,
+				"len", len([]rune(alias)), "max", 32)
 			return ErrInvalidParam
 		}
 		if err := uc.convRepo.UpdateMemberAlias(ctx, conversationID, operatorID, alias); err != nil {
+			uc.log.Errorw("msg", "更新群内昵称失败",
+				"conversationId", conversationID, "uid", operatorID, "err", err)
 			return err
 		}
+		uc.log.Infow("msg", "群内昵称已更新",
+			"conversationId", conversationID, "uid", operatorID)
 	}
 
 	name = strings.TrimSpace(name)
@@ -231,14 +286,21 @@ func (uc *GroupUseCase) UpdateGroupInfo(ctx context.Context, conversationID, ope
 
 	// 群名与群头像属于群维度，只有群主与管理员可以改
 	if member.Role != MemberRoleOwner && member.Role != MemberRoleAdmin {
+		uc.log.Warnw("msg", "无权限修改群资料",
+			"conversationId", conversationID, "operator", operatorID, "role", member.Role)
 		return ErrNoPermission
 	}
 	if name != "" && len([]rune(name)) > groupNameMaxLen {
+		uc.log.Warnw("msg", "群名超长",
+			"conversationId", conversationID, "operator", operatorID,
+			"len", len([]rune(name)), "max", groupNameMaxLen)
 		return ErrInvalidParam
 	}
 
 	conv, err := uc.convRepo.FindByID(ctx, conversationID)
 	if err != nil {
+		uc.log.Errorw("msg", "修改群资料时查询会话失败",
+			"conversationId", conversationID, "err", err)
 		return err
 	}
 	if name != "" {
@@ -247,12 +309,21 @@ func (uc *GroupUseCase) UpdateGroupInfo(ctx context.Context, conversationID, ope
 	if avatarURL != "" {
 		conv.AvatarURL = avatarURL
 	}
-	return uc.convRepo.Update(ctx, conv)
+	if err := uc.convRepo.Update(ctx, conv); err != nil {
+		uc.log.Errorw("msg", "更新群资料失败",
+			"conversationId", conversationID, "operator", operatorID, "err", err)
+		return err
+	}
+	uc.log.Infow("msg", "群资料已更新",
+		"conversationId", conversationID, "operator", operatorID,
+		"name", conv.Name)
+	return nil
 }
 
 // ListMembers 返回群成员列表，含昵称与头像。
 func (uc *GroupUseCase) ListMembers(ctx context.Context, conversationID, viewerID int64, withProfile bool) ([]*GroupMemberDetail, error) {
 	if conversationID <= 0 {
+		uc.log.Warnw("msg", "查询群成员列表参数非法", "conversationId", conversationID)
 		return nil, ErrInvalidParam
 	}
 	if _, err := uc.mustBeMember(ctx, conversationID, viewerID); err != nil {
@@ -261,6 +332,8 @@ func (uc *GroupUseCase) ListMembers(ctx context.Context, conversationID, viewerI
 
 	members, err := uc.convRepo.ListMembers(ctx, conversationID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询群成员列表失败",
+			"conversationId", conversationID, "err", err)
 		return nil, err
 	}
 
@@ -281,6 +354,10 @@ func (uc *GroupUseCase) ListMembers(ctx context.Context, conversationID, viewerI
 	for _, m := range members {
 		details = append(details, &GroupMemberDetail{Member: m, Brief: briefs[m.UserID]})
 	}
+	// Debug 级别：群成员列表会被频繁打开，且成员数可能较大
+	uc.log.Debugw("msg", "群成员列表已返回",
+		"conversationId", conversationID, "viewer", viewerID,
+		"withProfile", withProfile, "count", len(details))
 	return details, nil
 }
 
@@ -298,12 +375,19 @@ func (uc *GroupUseCase) ListMemberIDs(ctx context.Context, conversationID, viewe
 }
 
 // mustBeMember 校验用户是会话成员，并返回其成员信息。
+//
+// 与 ConversationUseCase.mustBeMember 一致：把「谁被拒了」记成 Warn，
+// 偶发是客户端 bug，突增则可能是越权探测。
 func (uc *GroupUseCase) mustBeMember(ctx context.Context, conversationID, userID int64) (*ConversationMember, error) {
 	member, err := uc.convRepo.FindMember(ctx, conversationID, userID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询群成员失败",
+			"conversationId", conversationID, "uid", userID, "err", err)
 		return nil, err
 	}
 	if member == nil {
+		uc.log.Warnw("msg", "非群成员访问被拒",
+			"conversationId", conversationID, "uid", userID)
 		return nil, ErrNotConversationMember
 	}
 	return member, nil

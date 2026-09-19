@@ -206,11 +206,20 @@ im/
 | GET | `/healthz` | 否 | 存活探针 |
 | GET | `/readyz` | 否 | 就绪探针（真实探测 DB/Redis） |
 | POST | `/api/user/register` | 否 | 注册（`email` / `password` / `nickName` / `gender`） |
-| POST | `/api/user/login` | 否 | 登录，返回 `userId` + `accessToken` + `accessExpire` |
+| POST | `/api/user/login` | 否 | 登录，返回 `userId` + `accessToken` + `accessExpire`，并登记设备在线位（可带 `deviceId` / `platform`） |
+| POST | `/api/user/logout` | 是 | 登出：吊销令牌并释放设备在线位 |
 | POST | `/api/user/personal_info` | 是 | 查询本人资料 |
 | POST | `/api/user/query_user_info` | 是 | 按 `userId` 查询他人资料 |
-| POST | `/api/user/reset_password` | 是 | 修改密码（需校验旧密码） |
+| POST | `/api/user/reset_password` | 是 | 修改密码（需校验旧密码，成功后吊销全部令牌） |
 | POST | `/api/user/modify_personal_info` | 是 | 修改昵称 / 性别 / 头像 |
+
+> **多设备在线上限**：由 `MAX_DEVICES_PER_USER` 控制（默认 3，0 表示不限制）。
+> 超限时按 Redis 有序集合的加入时间踢出最早的设备并吊销其令牌，
+> 被踢设备标识通过登录响应的 `evictedDevices` 返回。
+>
+> **令牌校验模式**：由 `TOKEN_MODE` 控制（默认 `db`）。
+> `self` 只验证 JWT 自身；`db` 还要求数据库中该令牌未被吊销，
+> 是「踢出即失效」与「改密即下线」的前提。
 
 ### 4.4 Chat（即时聊天，默认 `:8002`）
 
@@ -373,9 +382,25 @@ B ──handle_friend(isAgree=true)──▶ ① 条件更新申请状态（仅�
 | 表 | 说明 | 关键约束 |
 | --- | --- | --- |
 | `account_user` | 用户账号 | PK `id`（雪花）、UNIQUE `email` |
+| `account_token` | 在线访问令牌 | UNIQUE `jti`；UNIQUE `(user_id, device_id)`；`revoked_at` 为空表示仍有效 |
 
 > 表名用 `account_user` 而非 `user`：`user` 是 PostgreSQL 保留字，
 > 直接使用会在每次查询时都需要加引号，容易遗漏并引发语法错误。
+
+**`account_token` 为什么只存 `jti` 而不存令牌原文**
+
+`jti` 是 JWT 的唯一标识（随机 128 位）。数据库只保存它，校验时从 JWT 中
+取出 `jti` 去比对，同样能表达「这个令牌是否被吊销」，但：
+
+- 不占用每行数百字节的存储；
+- **不会把凭证泄露给任何能读该表的人**——拿到 `jti` 也无法伪造令牌。
+
+`revoked_at` 用「是否为空」而不是布尔列，因为空值天然携带
+「何时被吊销」这一信息，便于安全审计；配合 `revoked_by`
+可以区分 `logout`（主动登出）、`evicted`（被新设备挤出）、
+`password_reset`（改密）。
+
+详见 [0002_token.up.sql](file:///d:/GoCode/IMmessage/im/Account/migrations/0002_token.up.sql)。
 
 ### 6.2 Chat · `im_chat`
 
@@ -410,10 +435,26 @@ UNIQUE (conversation_id, sender_id, sender_seq)     -- 防止换 ID 重发绕过
 | `im:seq:c:{conversationId}` | String | 会话内序号计数器 | 无 |
 | `im:seq:s:{conversationId}:{senderId}` | String | 发送者维度序号 | 无 |
 | `im:route:{userId}` | Hash | 在线路由：`field=nodeId, value=心跳毫秒时间戳` | 180s |
+| `im:online:devices:{userId}` | ZSet | 设备在线有序集合：`member=deviceKey, score=上线毫秒时间戳` | `ONLINE_DEVICE_TTL`（默认 30 天） |
+| `im:user:brief:{uid}` | String | 用户简要信息缓存（昵称 / 头像） | 10 分钟 |
 
 > 在线路由用「节点 + 心跳时间戳」而非「节点列表」：多节点部署时同一用户
 > 可能被不同节点持有（重连漂移），时间戳可以判断节点是否仍存活，
 > 超时节点在查询时被惰性清理，避免消息投递到已宕机的节点。
+
+**`im:online:devices:{userId}` 为什么用有序集合**
+
+多设备在线上限需要两个能力，只有有序集合能同时满足：
+
+| 需求 | 有序集合如何满足 |
+| --- | --- |
+| 按上线时间淘汰**最早**的设备 | 按 score 排序，`ZRANGE 0 n-1` 一次取出最早的一批 |
+| 同一设备重复登录只占一个位置 | 以 member 去重，重新登录只更新 score，不新增成员 |
+
+集合（Set）无序、列表（List）无法按时间排序，两者都做不到这两点。
+
+`member` 的形态为 `d:<deviceId>`（客户端上报了 `deviceId`）或
+`j:<jti>`（未上报，退化为按令牌区分设备）。
 
 ### 6.4 Kafka Topic
 
@@ -463,6 +504,51 @@ Topic 名 = `${MQ_TOPIC_PREFIX}.${MQ_TOPIC_MESSAGE}`，便于多环境共用集�
 跨项目引用时先推送仓库，再用 `go get` 取伪版本号写入 `go.mod` ——
 这与生产环境的依赖解析方式一致，避免「本地能跑、CI 报错」。
 
+### 7.7 为什么令牌表只存 `jti` 而不存令牌原文
+
+撤销令牌的标准做法是「在数据库里标记它已失效」，而要做到这一点，
+数据库必须能唯一指认「是哪一个令牌」。有两种指认方式：
+
+| 方式 | 问题 |
+| --- | --- |
+| 存令牌原文（或它的哈希） | 每行数百字节；原文形式还会把凭证暴露给任何能读该表的人 |
+| **存 `jti`（JWT 的唯一标识）** | 无上述问题，且校验时只需从 JWT 里取出 `jti` 去比对 |
+
+因此签发时给令牌加 `jti` claim（128 位随机十六进制），数据库只保存它。
+即便 `account_token` 表被完整读出，攻击者也无法据此伪造或复用任何令牌。
+
+### 7.8 为什么多设备淘汰用 Redis 有序集合
+
+需求是「超出上限时踢出**最早登录**的设备」，并且「同一台设备重复登录
+不能占用多个名额」。逐项对比三种结构：
+
+| 结构 | 按时间淘汰最早的 | 同一设备去重 |
+| --- | --- | --- |
+| String（每设备一个键） | 需自己维护时间戳并全量扫描比较 | 可以（键名含设备标识） |
+| Set | ✗ 无序 | 可以 |
+| List | ✗ 只能两端进出，无法按时间排序 | ✗ 无法去重 |
+| **ZSet** | ✓ `ZRANGE 0 n-1` 直接取最早的一批 | ✓ 以 member 去重，重复登录只更新 score |
+
+ZSet 是唯一同时满足这两点的结构，且淘汰是 O(log N) 的 `ZREM`，
+不需要把全部设备捞进内存再排序。
+
+### 7.9 为什么「令牌失效」不返回 error
+
+`VerifyToken` 对「令牌过期 / 被吊销 / 存储中不存在」统一返回
+`(valid=false, err=nil)`，只有**存储故障**才返回 error。原因是调用方的
+处理方式完全不同：
+
+| 情况 | 调用方应按 | 对外 |
+| --- | --- | --- |
+| 令牌失效 | 正常业务分支 | `401`，客户端重新登录 |
+| 存储故障 | 服务端故障 | `5000`，需要告警与重试 |
+
+若把「令牌被吊销」也当成 error，调用方按 `err != nil` 处理会对外报 `5000`，
+把一次正常的重新登录变成服务故障，监控上也会产生大量假告警。
+
+反过来，存储故障时**必须拒绝放行**（fail-closed）：`db` 模式的语义是
+「必须确认未被吊销」，查不通就放行等于让被踢掉的设备重新获得访问权。
+
 ---
 
 ## 8. 配置说明
@@ -496,11 +582,22 @@ Topic 名 = `${MQ_TOPIC_PREFIX}.${MQ_TOPIC_MESSAGE}`，便于多环境共用集�
 | `HTTP_ADDR` / `GRPC_ADDR` | 监听地址 | `:8001/:9001`（account）、`:8002/:9002`（chat） |
 | `WS_ADDR` / `WS_PATH` | WebSocket 对外地址与路径（仅 Chat） | `:8002` / `/ws` |
 | `JWT_SECRET` / `JWT_ACCESS_EXPIRE` | 令牌密钥与有效期 | — / `86400` |
+| `TOKEN_MODE` | 令牌校验模式：`self` \| `db`（仅 Account） | `db` |
+| `MAX_DEVICES_PER_USER` | 单账号同时在线设备数上限，`0` 表示不限制（仅 Account） | `3` |
+| `ONLINE_DEVICE_TTL` | 设备在线有序集合的兜底有效期，`0` 表示不过期（仅 Account） | `720h` |
 | `ACCOUNT_RPC_ENDPOINT` | 账号中心 gRPC 地址（仅 Chat） | `127.0.0.1:9001` |
 
+> `DB_HOST` / `DB_NAME` / `CACHE_ADDRS` / `ACCOUNT_RPC_ENDPOINT` **刻意不设默认值**。
+> 给了兜底值会把「配置缺失」悄悄变成「用默认值连接」（例如连到另一个数据库），
+> 或让降级告警永远不触发。
+>
 > `MQ_TYPE=log` 是本地开发与自动化测试模式：它不依赖任何消息中间件，
 > 由投递方直接分发给消费者，使「发送 → 落库 → Outbox → 投递 → 消费 → 推送」
 > 全链路可以在无 Kafka 的情况下跑通并被断言。**生产环境禁止使用**。
+>
+> **`TOKEN_MODE` 的取舍**：`db` 是默认值，因为多设备踢下线与改密下线
+> 都依赖「吊销立即生效」。若改为 `self`，被踢的设备在令牌自然过期前
+> 仍能继续使用——这是静默的安全降级，因此取值写错会在启动时被拒绝。
 
 ---
 
@@ -518,6 +615,7 @@ make dev-up
 
 # 3. 建表（两个库分别执行）
 psql -h 127.0.0.1 -U postgres -d im_account -f Account/migrations/0001_init.up.sql
+psql -h 127.0.0.1 -U postgres -d im_account -f Account/migrations/0002_token.up.sql
 psql -h 127.0.0.1 -U postgres -d im_chat    -f Chat/migrations/0001_init.up.sql
 ```
 

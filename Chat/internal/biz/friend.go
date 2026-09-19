@@ -120,32 +120,50 @@ func NewFriendUseCase(
 // 返回的 alreadyFriends 用于告知调用方"你们已经是好友了"，此时不会创建新申请。
 func (uc *FriendUseCase) ApplyFriend(ctx context.Context, fromUID, toUID int64, applyMsg string) (*FriendRequest, bool, error) {
 	if fromUID <= 0 || toUID <= 0 {
+		uc.log.Warnw("msg", "好友申请参数非法", "from", fromUID, "to", toUID)
 		return nil, false, ErrInvalidParam
 	}
 	if fromUID == toUID {
+		uc.log.Warnw("msg", "尝试添加自己为好友", "uid", fromUID)
 		return nil, false, ErrCannotAddSelf
 	}
 	if len([]rune(applyMsg)) > 100 {
+		uc.log.Warnw("msg", "好友申请附言超长",
+			"from", fromUID, "to", toUID, "len", len([]rune(applyMsg)), "max", 100)
 		return nil, false, ErrInvalidParam
 	}
 
 	if friends, err := uc.repo.AreFriends(ctx, fromUID, toUID); err != nil {
+		uc.log.Errorw("msg", "查询好友关系失败",
+			"from", fromUID, "to", toUID, "err", err)
 		return nil, false, err
 	} else if friends {
+		// Debug 级别：这是客户端可预期的正常分支（重复点击添加），
+		// 按 Info 记录会在频繁操作时产生大量无信息量的日志。
+		uc.log.Debugw("msg", "双方已是好友，跳过申请",
+			"from", fromUID, "to", toUID)
 		return nil, true, nil
 	}
 
 	// 已有待处理申请时直接复用，避免用户连点产生一堆申请
 	if pending, err := uc.repo.FindPendingRequest(ctx, fromUID, toUID); err != nil {
+		uc.log.Errorw("msg", "查询待处理好友申请失败",
+			"from", fromUID, "to", toUID, "err", err)
 		return nil, false, err
 	} else if pending != nil {
 		if time.Now().Before(pending.ExpireAt) {
+			uc.log.Debugw("msg", "复用待处理的好友申请",
+				"from", fromUID, "to", toUID, "requestId", pending.ID)
 			return pending, false, nil
 		}
 		// 已过期的申请先置为过期，把 (from, to, 待处理) 这个唯一键让出来
 		if _, err := uc.repo.UpdateRequestStatus(ctx, pending.ID, FriendRequestExpired, time.Now()); err != nil {
+			uc.log.Errorw("msg", "标记好友申请过期失败",
+				"requestId", pending.ID, "err", err)
 			return nil, false, err
 		}
+		uc.log.Infow("msg", "好友申请已过期，允许重新申请",
+			"from", fromUID, "to", toUID, "requestId", pending.ID)
 	}
 
 	req := &FriendRequest{
@@ -156,6 +174,8 @@ func (uc *FriendUseCase) ApplyFriend(ctx context.Context, fromUID, toUID int64, 
 		ExpireAt: time.Now().Add(friendRequestTTL),
 	}
 	if err := uc.repo.CreateRequest(ctx, req); err != nil {
+		uc.log.Errorw("msg", "创建好友申请失败",
+			"from", fromUID, "to", toUID, "err", err)
 		return nil, false, err
 	}
 
@@ -170,18 +190,27 @@ func (uc *FriendUseCase) ApplyFriend(ctx context.Context, fromUID, toUID int64, 
 // 因此并发重复提交同一条申请不会产生两个会话。
 func (uc *FriendUseCase) HandleFriend(ctx context.Context, operatorID, requestID int64, agree bool) (int64, error) {
 	if operatorID <= 0 || requestID <= 0 {
+		uc.log.Warnw("msg", "处理好友申请参数非法",
+			"operator", operatorID, "requestId", requestID)
 		return 0, ErrInvalidParam
 	}
 
 	req, err := uc.repo.FindRequestByID(ctx, requestID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询好友申请失败",
+			"requestId", requestID, "operator", operatorID, "err", err)
 		return 0, err
 	}
 	// 只有收件人可以处理自己的申请
 	if req.ToUID != operatorID {
+		// Warn 而非 Error：越权处理是安全相关事件，突增时值得告警。
+		uc.log.Warnw("msg", "非收件人处理好友申请被拒",
+			"requestId", requestID, "operator", operatorID, "toUid", req.ToUID)
 		return 0, ErrNoPermission
 	}
 	if req.Status != FriendRequestPending {
+		uc.log.Warnw("msg", "好友申请已被处理过",
+			"requestId", requestID, "operator", operatorID, "status", req.Status)
 		return 0, ErrFriendRequestHandled
 	}
 
@@ -191,10 +220,15 @@ func (uc *FriendUseCase) HandleFriend(ctx context.Context, operatorID, requestID
 	}
 	changed, err := uc.repo.UpdateRequestStatus(ctx, requestID, target, time.Now())
 	if err != nil {
+		uc.log.Errorw("msg", "推进好友申请状态失败",
+			"requestId", requestID, "target", target, "err", err)
 		return 0, err
 	}
 	if !changed {
-		// 另一个并发请求已经处理过了
+		// 另一个并发请求已经处理过了。按 Info 记录：这不是故障，
+		// 而是条件更新在并发下按预期地只让一个请求胜出。
+		uc.log.Infow("msg", "好友申请已被并发的另一请求处理",
+			"requestId", requestID, "operator", operatorID)
 		return 0, ErrFriendRequestHandled
 	}
 
@@ -204,6 +238,8 @@ func (uc *FriendUseCase) HandleFriend(ctx context.Context, operatorID, requestID
 	}
 
 	if err := uc.repo.CreateRelation(ctx, req.FromUID, operatorID, ""); err != nil {
+		uc.log.Errorw("msg", "建立好友关系失败",
+			"requestId", requestID, "uidA", req.FromUID, "uidB", operatorID, "err", err)
 		return 0, err
 	}
 
@@ -223,9 +259,14 @@ func (uc *FriendUseCase) HandleFriend(ctx context.Context, operatorID, requestID
 // ListFriendRequests 查询收到的好友申请。
 func (uc *FriendUseCase) ListFriendRequests(ctx context.Context, userID int64, status int32, limit int) ([]*FriendRequest, error) {
 	if userID <= 0 {
+		uc.log.Warnw("msg", "查询好友申请列表参数非法", "uid", userID)
 		return nil, ErrInvalidParam
 	}
 	if limit <= 0 || limit > 200 {
+		// Info 而非 Warn：这是服务端对越界 limit 的主动收敛，
+		// 属于正常防御行为，不需要运维介入。
+		uc.log.Infow("msg", "好友申请列表 limit 越界，已收敛为默认值",
+			"uid", userID, "requested", limit)
 		limit = 50
 	}
 	return uc.repo.ListRequests(ctx, userID, status, limit)
@@ -234,14 +275,17 @@ func (uc *FriendUseCase) ListFriendRequests(ctx context.Context, userID int64, s
 // ListFriends 返回好友列表，并补齐展示所需的昵称与头像。
 func (uc *FriendUseCase) ListFriends(ctx context.Context, userID int64) ([]*FriendDetail, error) {
 	if userID <= 0 {
+		uc.log.Warnw("msg", "查询好友列表参数非法", "uid", userID)
 		return nil, ErrInvalidParam
 	}
 
 	relations, err := uc.repo.ListRelations(ctx, userID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询好友关系列表失败", "uid", userID, "err", err)
 		return nil, err
 	}
 	if len(relations) == 0 {
+		uc.log.Debugw("msg", "好友列表为空", "uid", userID)
 		return nil, nil
 	}
 
@@ -264,6 +308,7 @@ func (uc *FriendUseCase) ListFriends(ctx context.Context, userID int64) ([]*Frie
 			Brief:  briefs[rel.FriendID],
 		})
 	}
+	uc.log.Debugw("msg", "好友列表已返回", "uid", userID, "count", len(details))
 	return details, nil
 }
 
@@ -276,24 +321,43 @@ func (uc *FriendUseCase) AreFriends(ctx context.Context, uidA, uidB int64) (bool
 // 这样单聊记录不会因为删好友而凭空消失。
 func (uc *FriendUseCase) DeleteFriend(ctx context.Context, userID, friendID int64) error {
 	if userID <= 0 || friendID <= 0 || userID == friendID {
+		uc.log.Warnw("msg", "删除好友参数非法", "uid", userID, "friendId", friendID)
 		return ErrInvalidParam
 	}
-	return uc.repo.DeleteRelation(ctx, userID, friendID)
+	if err := uc.repo.DeleteRelation(ctx, userID, friendID); err != nil {
+		uc.log.Errorw("msg", "删除好友关系失败",
+			"uid", userID, "friendId", friendID, "err", err)
+		return err
+	}
+	uc.log.Infow("msg", "好友关系已解除", "uid", userID, "friendId", friendID)
+	return nil
 }
 
 // BlockUser 拉黑或取消拉黑某个用户。
 func (uc *FriendUseCase) BlockUser(ctx context.Context, userID, targetID int64, blocked bool) error {
 	if userID <= 0 || targetID <= 0 || userID == targetID {
+		uc.log.Warnw("msg", "拉黑操作参数非法",
+			"uid", userID, "targetId", targetID, "blocked", blocked)
 		return ErrInvalidParam
 	}
 	if blocked {
 		if friends, err := uc.repo.AreFriends(ctx, userID, targetID); err != nil {
+			uc.log.Errorw("msg", "查询好友关系失败",
+				"uid", userID, "targetId", targetID, "err", err)
 			return err
 		} else if !friends {
+			uc.log.Warnw("msg", "拉黑非好友被拒", "uid", userID, "targetId", targetID)
 			return ErrNotFriend
 		}
 	}
-	return uc.repo.SetBlocked(ctx, userID, targetID, blocked)
+	if err := uc.repo.SetBlocked(ctx, userID, targetID, blocked); err != nil {
+		uc.log.Errorw("msg", "更新拉黑状态失败",
+			"uid", userID, "targetId", targetID, "blocked", blocked, "err", err)
+		return err
+	}
+	uc.log.Infow("msg", "拉黑状态已更新",
+		"uid", userID, "targetId", targetID, "blocked", blocked)
+	return nil
 }
 
 // FindPendingRequestBetween 查询两人之间的待处理申请。
@@ -307,6 +371,7 @@ func (uc *FriendUseCase) FindPendingRequestBetween(ctx context.Context, fromUID,
 // FindRequestByID 按 ID 查询好友申请。
 func (uc *FriendUseCase) FindRequestByID(ctx context.Context, id int64) (*FriendRequest, error) {
 	if id <= 0 {
+		uc.log.Warnw("msg", "查询好友申请参数非法", "requestId", id)
 		return nil, ErrInvalidParam
 	}
 	return uc.repo.FindRequestByID(ctx, id)

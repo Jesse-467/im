@@ -192,14 +192,17 @@ func NewConversationUseCase(
 // 用户资料一次跨服务调用。全程固定 4 次 IO，不随会话数量线性增长。
 func (uc *ConversationUseCase) ListConversations(ctx context.Context, userID int64) ([]*ConversationItem, error) {
 	if userID <= 0 {
+		uc.log.Warnw("msg", "查询会话列表参数非法", "uid", userID)
 		return nil, ErrInvalidParam
 	}
 
 	relations, err := uc.repo.ListByUser(ctx, userID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询用户会话列表失败", "uid", userID, "err", err)
 		return nil, err
 	}
 	if len(relations) == 0 {
+		uc.log.Debugw("msg", "用户会话列表为空", "uid", userID)
 		return nil, nil
 	}
 
@@ -211,11 +214,15 @@ func (uc *ConversationUseCase) ListConversations(ctx context.Context, userID int
 	// 单聊需要知道"对方"是谁才能取到展示名，这里一次性查出全部单聊的对方 ID
 	peerOf, err := uc.repo.FindPeerIDs(ctx, convIDs, userID)
 	if err != nil {
+		uc.log.Errorw("msg", "批量查询单聊对方 ID 失败",
+			"uid", userID, "conversations", len(convIDs), "err", err)
 		return nil, err
 	}
 
 	lastMsgs, err := uc.msgRepo.FindLastByConversations(ctx, convIDs)
 	if err != nil {
+		uc.log.Errorw("msg", "批量查询会话最后一条消息失败",
+			"uid", userID, "conversations", len(convIDs), "err", err)
 		return nil, err
 	}
 
@@ -247,12 +254,15 @@ func (uc *ConversationUseCase) ListConversations(ctx context.Context, userID int
 		items = append(items, item)
 	}
 
+	// Debug 级别：会话列表是消息页首屏的最高频接口
+	uc.log.Debugw("msg", "会话列表已返回", "uid", userID, "count", len(items))
 	return items, nil
 }
 
 // GetConversation 返回会话及其成员。
 func (uc *ConversationUseCase) GetConversation(ctx context.Context, conversationID, viewerID int64) (*Conversation, []*ConversationMember, error) {
 	if conversationID <= 0 {
+		uc.log.Warnw("msg", "查询会话详情参数非法", "conversationId", conversationID)
 		return nil, nil, ErrInvalidParam
 	}
 
@@ -263,10 +273,14 @@ func (uc *ConversationUseCase) GetConversation(ctx context.Context, conversation
 
 	conv, err := uc.repo.FindByID(ctx, conversationID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询会话失败",
+			"conversationId", conversationID, "viewer", viewerID, "err", err)
 		return nil, nil, err
 	}
 	members, err := uc.repo.ListMembers(ctx, conversationID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询会话成员列表失败",
+			"conversationId", conversationID, "err", err)
 		return nil, nil, err
 	}
 	return conv, members, nil
@@ -275,12 +289,20 @@ func (uc *ConversationUseCase) GetConversation(ctx context.Context, conversation
 // MarkRead 上报已读位点。
 func (uc *ConversationUseCase) MarkRead(ctx context.Context, conversationID, userID, seq int64) error {
 	if conversationID <= 0 || seq < 0 {
+		uc.log.Warnw("msg", "已读上报参数非法",
+			"conversationId", conversationID, "uid", userID, "seq", seq)
 		return ErrInvalidParam
 	}
 	if _, err := uc.mustBeMember(ctx, conversationID, userID); err != nil {
 		return err
 	}
-	return uc.repo.UpdateMemberReadSeq(ctx, conversationID, userID, seq)
+	if err := uc.repo.UpdateMemberReadSeq(ctx, conversationID, userID, seq); err != nil {
+		return err
+	}
+	// 用 Debug 级别：已读上报由客户端高频触发（每次进入会话、滚动到底部），
+	// 按 Info 记录会迅速淹没真正有价值的日志。
+	uc.log.Debugw("msg", "已读位点已推进", "conversationId", conversationID, "uid", userID, "seq", seq)
+	return nil
 }
 
 // EnsureSingleConversation 确保两个用户之间的单聊会话存在，不存在则创建。
@@ -320,8 +342,13 @@ func (uc *ConversationUseCase) EnsureSingleConversation(ctx context.Context, uid
 	if err := uc.repo.Create(ctx, conv, members); err != nil {
 		// 并发创建时唯一冲突即代表"别人已经建好了"，回查一次即可
 		if existing, ferr := uc.repo.FindByBizKey(ctx, ConversationTypeSingle, bizKey); ferr == nil {
+			uc.log.Infow("msg", "单聊会话并发创建，复用已存在的会话",
+				"conversationId", existing.ID, "uidA", uidA, "uidB", uidB)
 			return existing, nil
 		}
+		// 到这里说明不是并发冲突，而是真实失败（如建表缺失、连接断开）
+		uc.log.Errorw("msg", "创建单聊会话失败",
+			"uidA", uidA, "uidB", uidB, "bizKey", bizKey, "err", err)
 		return nil, err
 	}
 
@@ -330,12 +357,19 @@ func (uc *ConversationUseCase) EnsureSingleConversation(ctx context.Context, uid
 }
 
 // mustBeMember 校验用户确实是会话成员。
+//
+// 这是权限体系的关键收口点：所有涉及会话内数据的操作都经它把关，
+// 因此把「谁被拒了」记成 Warn —— 偶发是客户端 bug，突增则可能是越权探测。
 func (uc *ConversationUseCase) mustBeMember(ctx context.Context, conversationID, userID int64) (*ConversationMember, error) {
 	member, err := uc.repo.FindMember(ctx, conversationID, userID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询会话成员失败",
+			"conversationId", conversationID, "uid", userID, "err", err)
 		return nil, err
 	}
 	if member == nil {
+		uc.log.Warnw("msg", "非会话成员访问被拒",
+			"conversationId", conversationID, "uid", userID)
 		return nil, ErrNotConversationMember
 	}
 	return member, nil
@@ -352,6 +386,7 @@ func (uc *ConversationUseCase) mustBeMember(ctx context.Context, conversationID,
 func (uc *ConversationUseCase) ResolveConversationID(ctx context.Context, raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
+		uc.log.Warnw("msg", "会话标识为空")
 		return 0, ErrInvalidParam
 	}
 
@@ -359,9 +394,15 @@ func (uc *ConversationUseCase) ResolveConversationID(ctx context.Context, raw st
 		return id, nil
 	}
 
+	// 走到这里说明不是纯数字，尝试按单聊业务键回查（兼容旧的 "minUid_maxUid" 形态）
 	if conv, err := uc.repo.FindByBizKey(ctx, ConversationTypeSingle, raw); err == nil {
+		uc.log.Debugw("msg", "按业务键解析出会话 ID",
+			"bizKey", raw, "conversationId", conv.ID)
 		return conv.ID, nil
 	}
+	// Warn 级别：解析失败通常是客户端传了过期的会话标识，
+	// 突增时说明客户端缓存或协议对接有问题。
+	uc.log.Warnw("msg", "无法解析会话标识", "raw", raw)
 	return 0, ErrConversationNotFound
 }
 
@@ -371,14 +412,20 @@ func (uc *ConversationUseCase) ResolveConversationID(ctx context.Context, raw st
 // 需要据此推断出申请双方。
 func (uc *ConversationUseCase) PeerOfSingle(ctx context.Context, conversationID, selfID int64) (int64, error) {
 	if conversationID <= 0 {
+		uc.log.Warnw("msg", "查询单聊对方参数非法",
+			"conversationId", conversationID, "self", selfID)
 		return 0, ErrInvalidParam
 	}
 	peers, err := uc.repo.FindPeerIDs(ctx, []int64{conversationID}, selfID)
 	if err != nil {
+		uc.log.Errorw("msg", "查询单聊对方失败",
+			"conversationId", conversationID, "self", selfID, "err", err)
 		return 0, err
 	}
 	peer, ok := peers[conversationID]
 	if !ok || peer <= 0 {
+		uc.log.Warnw("msg", "单聊会话不存在对方",
+			"conversationId", conversationID, "self", selfID)
 		return 0, ErrConversationNotFound
 	}
 	return peer, nil

@@ -3,7 +3,7 @@ module github.com/Jesse-467/im/Account
 go 1.23.1
 
 require (
-	github.com/Jesse-467/im/pkg v0.0.0-20260918194210-6733a841cb25
+	github.com/Jesse-467/im/pkg v0.0.0-20260919080602-0f065bc3226b
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-kratos/kratos/v2 v2.9.2
 	github.com/golang-jwt/jwt/v5 v5.2.2

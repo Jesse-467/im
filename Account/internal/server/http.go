@@ -124,6 +124,7 @@ func (s *HTTPServer) registerRoutes(c *conf.Config, svc *service.AccountService)
 		secured.POST("/query_user_info", svc.HTTPQueryUserInfo)
 		secured.POST("/reset_password", svc.HTTPResetPassword)
 		secured.POST("/modify_personal_info", svc.HTTPModifyPersonalInfo)
+		secured.POST("/logout", svc.HTTPLogout)
 	}
 }
 

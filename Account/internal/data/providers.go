@@ -10,6 +10,9 @@ import (
 var ProviderSet = wire.NewSet(
 	NewData,
 	NewUserRepo,
+	NewTokenRepo,
+	NewDeviceTTL,
+	NewDeviceStore,
 	NewPostgresChecker,
 	NewRedisChecker,
 	NewHealthCheckers,

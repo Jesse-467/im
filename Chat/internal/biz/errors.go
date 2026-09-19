@@ -33,9 +33,15 @@ var (
 	ErrGroupOwnerCannotQuit = errors.New("群主不能直接退群")
 	ErrCannotRemoveOwner    = errors.New("不能移除群主")
 	ErrAlreadyGroupMember   = errors.New("对方已在群聊中")
+	// ErrGroupMemberLimitExceeded 与 ErrInvalidParam 分开，便于客户端区分
+	// 「参数写错了」与「群满了」——前者要改请求，后者要换策略（如新建群）。
+	ErrGroupMemberLimitExceeded = errors.New("群成员数已达上限")
 
 	// 消息
 	ErrMessageNotFound      = errors.New("消息不存在")
 	ErrMessageNotRecallable = errors.New("该消息无法撤回（不存在、非本人发送或已撤回）")
 	ErrSeqAllocFailed       = errors.New("消息序号分配失败，请重试")
+
+	// 账号与登录
+	ErrAccountUnavailable = errors.New("账号中心暂时不可用，请稍后重试")
 )

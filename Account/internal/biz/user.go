@@ -154,6 +154,18 @@ func (uc *UserUseCase) GetUser(ctx context.Context, id int64) (*User, error) {
 	return uc.repo.FindByID(ctx, id)
 }
 
+// GetUserByEmail 按邮箱查询用户。
+//
+// 供改密后吊销令牌使用：改密请求只带邮箱，而令牌是按用户 ID 组织的，
+// 因此需要一个按邮箱取用户的入口。
+func (uc *UserUseCase) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if !looksLikeEmail(email) {
+		return nil, ErrInvalidParam
+	}
+	return uc.repo.FindByEmail(ctx, email)
+}
+
 // BatchGetUsers 批量查询用户，返回 id -> User 映射。
 //
 // 供 Chat 服务一次拉取会话所需的全部用户资料，避免 N+1 次跨服务调用。

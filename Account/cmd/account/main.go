@@ -33,6 +33,12 @@ func main() {
 	}
 	log.SetLogger(logger)
 
+	// 可降级的配置问题在此刻输出：Load 阶段 logger 尚未就绪，
+	// 若那时直接打印会绕过统一的日志格式与采集。
+	cfg.ReportDegradations(func(format string, args ...any) {
+		log.NewHelper(logger).Warnf(format, args...)
+	})
+
 	app, cleanup, err := initApp(cfg, logger)
 	if err != nil {
 		log.Fatalf("初始化应用失败: %v", err)

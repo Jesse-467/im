@@ -209,11 +209,19 @@ type SendResult struct {
 // 的容忍度远高于对乱序的容忍度，而若先落库再发号则必须引入两阶段提交。
 func (uc *MessageUseCase) Send(ctx context.Context, req *SendMessageRequest) (*SendResult, error) {
 	if err := uc.validateSendRequest(req); err != nil {
+		uc.log.Warnw("msg", "发送消息参数非法",
+			"conversationId", req.ConversationID, "senderId", req.SenderID,
+			"type", req.Type, "err", err)
 		return nil, err
 	}
 
 	// 成员校验：非成员不得向会话发消息
 	if _, err := uc.convRepo.FindMember(ctx, req.ConversationID, req.SenderID); err != nil {
+		// 非成员是一个正常的业务拒绝分支，但由 FindMember 返回的错误
+		// 可能是真实故障（如连接断开），因此这里按 Error 记录并带上原始错误，
+		// 由日志读者根据 err 内容区分。
+		uc.log.Errorw("msg", "发送消息的成员校验失败",
+			"conversationId", req.ConversationID, "senderId", req.SenderID, "err", err)
 		return nil, err
 	}
 
@@ -222,6 +230,8 @@ func (uc *MessageUseCase) Send(ctx context.Context, req *SendMessageRequest) (*S
 		// 客户端未提供幂等键时由服务端生成，保证该列不为空
 		id, err := uc.idGen.Next()
 		if err != nil {
+			uc.log.Errorw("msg", "生成服务端幂等键失败",
+				"conversationId", req.ConversationID, "err", err)
 			return nil, err
 		}
 		clientMsgID = "srv-" + strconv.FormatInt(id, 36)
@@ -229,21 +239,33 @@ func (uc *MessageUseCase) Send(ctx context.Context, req *SendMessageRequest) (*S
 
 	// 幂等回查：命中则直接返回既有消息，不再发号、不再落库、不再投递
 	if existing, err := uc.repo.FindByConversationAndClientMsgID(ctx, req.ConversationID, req.SenderID, clientMsgID); err == nil && existing != nil {
+		// Info 而非 Debug：幂等命中率是判断「客户端重试是否异常偏高」的关键指标，
+		// 需要能在默认日志级别下被统计。
+		uc.log.Infow("msg", "发送消息命中幂等键，返回既有消息",
+			"conversationId", req.ConversationID, "senderId", req.SenderID,
+			"clientMsgId", clientMsgID, "messageId", existing.ID, "seq", existing.Seq)
 		return &SendResult{Message: existing, Duplicated: true}, nil
 	}
 
 	msgID, err := uc.idGen.Next()
 	if err != nil {
+		uc.log.Errorw("msg", "生成消息 ID 失败",
+			"conversationId", req.ConversationID, "err", err)
 		return nil, err
 	}
 
 	seq, err := uc.seq.Next(ctx, req.ConversationID)
 	if err != nil {
+		// 发号失败通常意味着 Redis 不可用，是最需要告警的一类故障
+		uc.log.Errorw("msg", "分配会话序号失败",
+			"conversationId", req.ConversationID, "senderId", req.SenderID, "err", err)
 		return nil, err
 	}
 
 	senderSeq, err := uc.seq.NextSenderSeq(ctx, req.ConversationID, req.SenderID)
 	if err != nil {
+		uc.log.Errorw("msg", "分配发送者序号失败",
+			"conversationId", req.ConversationID, "senderId", req.SenderID, "err", err)
 		return nil, err
 	}
 
@@ -264,6 +286,8 @@ func (uc *MessageUseCase) Send(ctx context.Context, req *SendMessageRequest) (*S
 
 	event, err := uc.buildOutboxEvent(msg)
 	if err != nil {
+		uc.log.Errorw("msg", "构造 Outbox 事件失败",
+			"conversationId", req.ConversationID, "messageId", msgID, "err", err)
 		return nil, err
 	}
 
@@ -271,8 +295,14 @@ func (uc *MessageUseCase) Send(ctx context.Context, req *SendMessageRequest) (*S
 		// 并发重试时可能同时通过了幂等回查，此时唯一约束会拦下后到的那个。
 		// 这不是错误，按幂等语义返回已存在的消息即可。
 		if existing, ferr := uc.repo.FindByConversationAndClientMsgID(ctx, req.ConversationID, req.SenderID, clientMsgID); ferr == nil && existing != nil {
+			uc.log.Infow("msg", "并发发送撞唯一约束，回查命中既有消息",
+				"conversationId", req.ConversationID, "clientMsgId", clientMsgID,
+				"messageId", existing.ID, "seq", existing.Seq)
 			return &SendResult{Message: existing, Duplicated: true}, nil
 		}
+		uc.log.Errorw("msg", "消息落库失败",
+			"conversationId", req.ConversationID, "messageId", msgID,
+			"seq", seq, "clientMsgId", clientMsgID, "err", err)
 		return nil, err
 	}
 
@@ -295,9 +325,13 @@ func (uc *MessageUseCase) Send(ctx context.Context, req *SendMessageRequest) (*S
 //   - 历史翻页：ascending=false，从最旧一条往前翻。
 func (uc *MessageUseCase) Pull(ctx context.Context, req *PullMessagesRequest) (*PullMessagesResult, error) {
 	if req.ConversationID <= 0 || req.UserID <= 0 {
+		uc.log.Warnw("msg", "拉取消息参数非法",
+			"conversationId", req.ConversationID, "uid", req.UserID)
 		return nil, ErrInvalidParam
 	}
 	if _, err := uc.convRepo.FindMember(ctx, req.ConversationID, req.UserID); err != nil {
+		uc.log.Errorw("msg", "拉取消息的成员校验失败",
+			"conversationId", req.ConversationID, "uid", req.UserID, "err", err)
 		return nil, err
 	}
 
@@ -306,18 +340,33 @@ func (uc *MessageUseCase) Pull(ctx context.Context, req *PullMessagesRequest) (*
 		limit = pullDefaultLimit
 	}
 	if limit > pullMaxLimit {
+		// Info 而非 Warn：这是服务端主动收敛越界 limit，属于正常防御。
+		uc.log.Infow("msg", "拉取消息 limit 越界，已收敛为上限",
+			"conversationId", req.ConversationID, "uid", req.UserID,
+			"requested", req.Limit, "applied", pullMaxLimit)
 		limit = pullMaxLimit
 	}
 
 	conv, err := uc.convRepo.FindByID(ctx, req.ConversationID)
 	if err != nil {
+		uc.log.Errorw("msg", "拉取消息时查询会话失败",
+			"conversationId", req.ConversationID, "err", err)
 		return nil, err
 	}
 
 	msgs, err := uc.repo.ListBySeqRange(ctx, req.ConversationID, req.FromSeq, req.ToSeq, limit, req.Ascending)
 	if err != nil {
+		uc.log.Errorw("msg", "按序号区间拉取消息失败",
+			"conversationId", req.ConversationID, "fromSeq", req.FromSeq,
+			"toSeq", req.ToSeq, "limit", limit, "err", err)
 		return nil, err
 	}
+
+	// Debug 级别：拉取是客户端高频调用（每次进入会话、翻页、重连补洞），
+	// 按 Info 记录会淹没真正有价值的日志。
+	uc.log.Debugw("msg", "消息已拉取",
+		"conversationId", req.ConversationID, "uid", req.UserID,
+		"fromSeq", req.FromSeq, "count", len(msgs), "maxSeq", conv.MaxSeq)
 
 	return &PullMessagesResult{
 		Messages: msgs,
@@ -336,18 +385,29 @@ func (uc *MessageUseCase) Pull(ctx context.Context, req *PullMessagesRequest) (*
 // 不同业务线无法差异化配置。
 func (uc *MessageUseCase) Recall(ctx context.Context, conversationID, messageID, operatorID int64) error {
 	if conversationID <= 0 || messageID <= 0 || operatorID <= 0 {
+		uc.log.Warnw("msg", "撤回消息参数非法",
+			"conversationId", conversationID, "messageId", messageID, "operator", operatorID)
 		return ErrInvalidParam
 	}
 	if _, err := uc.convRepo.FindMember(ctx, conversationID, operatorID); err != nil {
+		uc.log.Errorw("msg", "撤回消息的成员校验失败",
+			"conversationId", conversationID, "operator", operatorID, "err", err)
 		return err
 	}
 
 	ok, err := uc.repo.Recall(ctx, conversationID, messageID, operatorID)
 	if err != nil {
+		uc.log.Errorw("msg", "撤回消息失败",
+			"conversationId", conversationID, "messageId", messageID,
+			"operator", operatorID, "err", err)
 		return err
 	}
 	if !ok {
-		// 条件更新影响 0 行：要么消息不存在，要么不是本人发送，要么已被撤回
+		// 条件更新影响 0 行：要么消息不存在，要么不是本人发送，要么已被撤回。
+		// Warn 级别：能区分「客户端传错 ID」与「越权撤回他人消息」，
+		// 后者突增时值得关注。
+		uc.log.Warnw("msg", "消息不可撤回",
+			"conversationId", conversationID, "messageId", messageID, "operator", operatorID)
 		return ErrMessageNotRecallable
 	}
 
@@ -366,6 +426,8 @@ func (uc *MessageUseCase) validateSendRequest(req *SendMessageRequest) error {
 	switch req.Type {
 	case MessageTypeText, MessageTypeImage, MessageTypeVideo, MessageTypeAudio, MessageTypeSystem:
 	default:
+		// 消息类型无默认值，客户端漏传会直接命中这里。
+		// 单独判断并在调用方打印具体 type，便于排查协议对接问题。
 		return ErrInvalidParam
 	}
 	if len([]rune(req.Content)) > messageContentMaxLen {

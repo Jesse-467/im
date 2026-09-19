@@ -51,6 +51,11 @@ func NewChatService(
 //
 // 这是分层的关键收口点：biz 只表达「发生了什么」，由这里决定
 // 「对外的错误码与文案是什么」。
+//
+// 日志分级刻意如此：已知领域错误是「客户端可预期的业务分支」，
+// 已在 biz 层用 Warn/Debug 记录过，这里不再重复打印；
+// 只有落到 CodeServerError 的未知错误才需要在此告警——它意味着
+// 出现了未被识别的故障，且客户端只会看到「服务繁忙」。
 func toErrs(err error) error {
 	if err == nil {
 		return nil
@@ -96,7 +101,8 @@ func bizErrCode(err error) uint32 {
 		errors.Is(err, biz.ErrFriendRequestHandled),
 		errors.Is(err, biz.ErrAlreadyGroupMember),
 		errors.Is(err, biz.ErrCannotAddSelf),
-		errors.Is(err, biz.ErrMessageNotRecallable):
+		errors.Is(err, biz.ErrMessageNotRecallable),
+		errors.Is(err, biz.ErrGroupMemberLimitExceeded):
 		return errs.CodeDataExist
 
 	default:

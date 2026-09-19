@@ -31,7 +31,12 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 	}
 	userRepo := data.NewUserRepo(dataData)
 	userUseCase := biz.NewUserUseCase(userRepo, logger)
-	accountService := service.NewAccountService(userUseCase, cfg, logger)
+	tokenRepo := data.NewTokenRepo(dataData)
+	deviceTTL := data.NewDeviceTTL(cfg)
+	deviceStore := data.NewDeviceStore(dataData, deviceTTL)
+	sessionOptions := biz.ProvideSessionOptions(cfg)
+	sessionUseCase := biz.NewSessionUseCase(tokenRepo, deviceStore, logger, sessionOptions)
+	accountService := service.NewAccountService(userUseCase, sessionUseCase, cfg, logger)
 	postgresChecker := data.NewPostgresChecker(dataData)
 	redisChecker := data.NewRedisChecker(dataData)
 	v := data.NewHealthCheckers(postgresChecker, redisChecker)

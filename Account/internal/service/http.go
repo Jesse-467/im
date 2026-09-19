@@ -1,6 +1,8 @@
 package service
 
 import (
+	"strings"
+
 	"github.com/gin-gonic/gin"
 
 	accountv1 "github.com/Jesse-467/im/pkg/account/v1"
@@ -29,6 +31,18 @@ type registerReq struct {
 type loginReq struct {
 	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required,min=6,max=32"`
+	// DeviceId 标识「同一台设备」，用于多设备在线上限的计数与踢出。
+	// 客户端应在本地持久化它（如首次启动生成的 UUID），否则每次登录
+	// 都会被当成一台新设备。
+	DeviceId string `json:"deviceId"`
+	// Platform 仅用于展示与排障，如 web / ios / android
+	Platform string `json:"platform"`
+}
+
+type logoutReq struct {
+	// AccessToken 待吊销的令牌。也支持放在 Authorization 头（见处理函数）。
+	AccessToken string `json:"accessToken"`
+	DeviceId    string `json:"deviceId"`
 }
 
 type queryUserInfoReq struct {
@@ -58,6 +72,15 @@ type loginResp struct {
 	UserId       int64  `json:"userId"`
 	AccessToken  string `json:"accessToken"`
 	AccessExpire int64  `json:"accessExpire"`
+	// EvictedDevices 是本次登录因超出设备数上限而被踢下线的设备标识。
+	//
+	// 用 omitempty：绝大多数登录没有设备被踢，省略空数组可让响应体保持简洁，
+	// 同时客户端判断「是否有设备被踢」只需检查字段是否存在。
+	EvictedDevices []string `json:"evictedDevices,omitempty"`
+}
+
+type logoutResp struct {
+	Success bool `json:"success"`
 }
 
 type profileResp struct {
@@ -110,16 +133,58 @@ func (s *AccountService) HTTPLogin(c *gin.Context) {
 	resp, err := s.Login(c.Request.Context(), &accountv1.LoginRequest{
 		Email:    req.Email,
 		Password: req.Password,
+		DeviceId: req.DeviceId,
+		Platform: req.Platform,
 	})
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
 	httpx.OK(c, loginResp{
-		UserId:       resp.GetUserId(),
-		AccessToken:  resp.GetAccessToken(),
-		AccessExpire: resp.GetAccessExpire(),
+		UserId:         resp.GetUserId(),
+		AccessToken:    resp.GetAccessToken(),
+		AccessExpire:   resp.GetAccessExpire(),
+		EvictedDevices: resp.GetEvictedDevices(),
 	})
+}
+
+// HTTPLogout 处理 POST /api/user/logout，吊销当前令牌并释放设备在线位。
+//
+// 令牌来源优先级：请求体 accessToken > Authorization 头。
+// 两者都接受是因为调用场景不同：已登录客户端习惯用头，
+// 而「退出登录」页面可能只想显式传令牌。
+func (s *AccountService) HTTPLogout(c *gin.Context) {
+	var req logoutReq
+	// 允许空请求体（仅靠 Authorization 头）：绑定失败且体为空时不报错
+	if err := c.ShouldBindJSON(&req); err != nil && err.Error() != "EOF" {
+		httpx.Fail(c, errs.Wrap(err, errs.CodeParamError, "参数校验失败"))
+		return
+	}
+
+	token := req.AccessToken
+	if token == "" {
+		token = bearerToken(c)
+	}
+	if token == "" {
+		httpx.Fail(c, errs.New(errs.CodeUnauthorized, ""))
+		return
+	}
+
+	resp, err := s.Logout(c.Request.Context(), &accountv1.LogoutRequest{
+		AccessToken: token,
+		DeviceId:    req.DeviceId,
+	})
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, logoutResp{Success: resp.GetSuccess()})
+}
+
+// bearerToken 从 Authorization 头提取 Bearer 令牌，不存在时返回空串。
+func bearerToken(c *gin.Context) string {
+	raw := c.GetHeader("Authorization")
+	return strings.TrimSpace(strings.TrimPrefix(raw, "Bearer "))
 }
 
 // HTTPPersonalInfo 处理 POST /api/user/personal_info，查询本人资料。
