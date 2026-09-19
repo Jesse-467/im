@@ -216,13 +216,17 @@ func (uc *MessageUseCase) Send(ctx context.Context, req *SendMessageRequest) (*S
 	}
 
 	// 成员校验：非成员不得向会话发消息
-	if _, err := uc.convRepo.FindMember(ctx, req.ConversationID, req.SenderID); err != nil {
-		// 非成员是一个正常的业务拒绝分支，但由 FindMember 返回的错误
-		// 可能是真实故障（如连接断开），因此这里按 Error 记录并带上原始错误，
-		// 由日志读者根据 err 内容区分。
+	//
+	// 注意 FindMember 的契约是「查不到返回 (nil, nil)」，只有真实故障才返回 error，
+	// 因此必须先判 err 再判 member == nil，只判 err 会让非成员直接通过。
+	if member, err := uc.convRepo.FindMember(ctx, req.ConversationID, req.SenderID); err != nil {
 		uc.log.Errorw("msg", "发送消息的成员校验失败",
 			"conversationId", req.ConversationID, "senderId", req.SenderID, "err", err)
 		return nil, err
+	} else if member == nil {
+		uc.log.Warnw("msg", "非会话成员发送消息被拒",
+			"conversationId", req.ConversationID, "senderId", req.SenderID)
+		return nil, ErrNotConversationMember
 	}
 
 	clientMsgID := req.ClientMsgID
@@ -329,10 +333,15 @@ func (uc *MessageUseCase) Pull(ctx context.Context, req *PullMessagesRequest) (*
 			"conversationId", req.ConversationID, "uid", req.UserID)
 		return nil, ErrInvalidParam
 	}
-	if _, err := uc.convRepo.FindMember(ctx, req.ConversationID, req.UserID); err != nil {
+	// 成员校验：FindMember 查不到时返回 (nil, nil)，必须显式判空
+	if member, err := uc.convRepo.FindMember(ctx, req.ConversationID, req.UserID); err != nil {
 		uc.log.Errorw("msg", "拉取消息的成员校验失败",
 			"conversationId", req.ConversationID, "uid", req.UserID, "err", err)
 		return nil, err
+	} else if member == nil {
+		uc.log.Warnw("msg", "非会话成员拉取消息被拒",
+			"conversationId", req.ConversationID, "uid", req.UserID)
+		return nil, ErrNotConversationMember
 	}
 
 	limit := req.Limit
@@ -389,10 +398,15 @@ func (uc *MessageUseCase) Recall(ctx context.Context, conversationID, messageID,
 			"conversationId", conversationID, "messageId", messageID, "operator", operatorID)
 		return ErrInvalidParam
 	}
-	if _, err := uc.convRepo.FindMember(ctx, conversationID, operatorID); err != nil {
+	// 成员校验：FindMember 查不到时返回 (nil, nil)，必须显式判空
+	if member, err := uc.convRepo.FindMember(ctx, conversationID, operatorID); err != nil {
 		uc.log.Errorw("msg", "撤回消息的成员校验失败",
 			"conversationId", conversationID, "operator", operatorID, "err", err)
 		return err
+	} else if member == nil {
+		uc.log.Warnw("msg", "非会话成员撤回消息被拒",
+			"conversationId", conversationID, "operator", operatorID)
+		return ErrNotConversationMember
 	}
 
 	ok, err := uc.repo.Recall(ctx, conversationID, messageID, operatorID)
