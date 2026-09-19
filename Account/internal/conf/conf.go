@@ -62,6 +62,18 @@ type DB struct {
 	ConnMaxLifetime time.Duration
 }
 
+// Configured 判断数据库是否已配置。
+//
+// 不能拿 EffectiveDSN() 是否为空来判断：它总是返回拼接后的字符串，
+// 即使各字段全为空也会产出一串 "host= port=0 user= ..." 的无效 DSN，
+// 于是该校验形同虚设，服务会带着空地址启动、直到第一次查询才失败。
+func (d DB) Configured() bool {
+	if d.DSN != "" {
+		return true
+	}
+	return d.Host != "" && d.Name != ""
+}
+
 // EffectiveDSN 返回最终使用的 DSN。
 //
 // 采用 PostgreSQL 的关键字/值形式而非 URL 形式：口令中常含 @ : / 等字符，
@@ -239,7 +251,7 @@ func (c *Config) Validate() error {
 	if c.ServiceName == "" {
 		return fmt.Errorf("conf: ServiceName 不能为空")
 	}
-	if c.DB.EffectiveDSN() == "" {
+	if !c.DB.Configured() {
 		return fmt.Errorf("conf: 数据库未配置，请设置 DB_DSN 或 DB_HOST/DB_NAME")
 	}
 	if c.DB.MaxOpenConns <= 0 {
