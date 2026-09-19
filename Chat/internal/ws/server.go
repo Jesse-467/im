@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -37,7 +38,21 @@ const (
 	TypePong = "pong"
 	// TypeError 错误提示
 	TypeError = "error"
+
+	// TypeKicked 通知客户端「你的连接被服务端主动断开」（被踢下线 / 登出 / 改密）。
+	//
+	// 与 TypeError 区分开：错误提示是「这条上行消息有问题」，连接仍可继续；
+	// 本类型是「连接即将关闭」，客户端收到后应停止重连并回到登录态。
+	TypeKicked = "kicked"
 )
+
+// reverifyInterval 是连接存活期间向账号中心复核令牌状态的间隔。
+//
+// 握手时鉴权一次无法感知后续的令牌吊销（被踢下线 / 登出 / 改密），
+// 因此网关按该间隔复核，发现被吊销即主动断开连接。
+// 取值与心跳同量级：足够快让踢下线在短时间内生效，
+// 又不至于给账号中心带来可观的额外调用量（每连接每分钟约 2 次）。
+const reverifyInterval = 30 * time.Second
 
 // Server 是 WebSocket 网关。
 type Server struct {
@@ -217,10 +232,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	authCtx, cancel := context.WithTimeout(r.Context(), authTimeout)
 	defer cancel()
 
-	uid, err := s.authenticate(authCtx, r)
+	uid, token, err := s.authenticate(authCtx, r)
 	if err != nil {
 		s.log.Warnw("msg", "WebSocket 鉴权失败", "err", err, "remote", r.RemoteAddr)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		// 区分「凭证被吊销」与「令牌无效/过期」：浏览器 WebSocket API 读不到
+		// 响应体，但移动端与自定义客户端可以据此决定是刷新令牌还是直接重新登录。
+		if errors.Is(err, auth.ErrTokenRevoked) {
+			http.Error(w, "token revoked", http.StatusForbidden)
+		} else {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}
 		return
 	}
 
@@ -235,7 +256,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		platform = "unknown"
 	}
 
-	c := newConn(uid, s.presence.NodeID(), platform, strconv.FormatInt(s.idGen.MustNext(), 36))
+	c := newConn(uid, s.presence.NodeID(), platform, strconv.FormatInt(s.idGen.MustNext(), 36), token)
 
 	s.registry.Add(c)
 	s.markOnline(r.Context(), uid)
@@ -268,15 +289,22 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 //
 // 校验委托给 auth.Verifier：它在本地验签之外还会（按配置）向账号中心
 // 确认令牌未被吊销，因此被踢下线的设备无法再建立长连接。
-func (s *Server) authenticate(ctx context.Context, r *http.Request) (int64, error) {
+//
+// 返回原始令牌是为了让网关在连接存活期间能周期性复核其状态
+// （见 writePump 的 reverify 逻辑）。
+func (s *Server) authenticate(ctx context.Context, r *http.Request) (int64, string, error) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		token = strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	}
 	if token == "" {
-		return 0, auth.ErrMissingToken
+		return 0, "", auth.ErrMissingToken
 	}
-	return s.verifier.Verify(ctx, token)
+	uid, err := s.verifier.Verify(ctx, token)
+	if err != nil {
+		return 0, "", err
+	}
+	return uid, token, nil
 }
 
 // readPump 读取客户端消息，阻塞直到连接关闭。
@@ -327,6 +355,9 @@ func (s *Server) writePump(conn *websocket.Conn, c *Conn) {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
 
+	reverify := time.NewTicker(reverifyInterval)
+	defer reverify.Stop()
+
 	for {
 		select {
 		case payload := <-c.send:
@@ -346,6 +377,22 @@ func (s *Server) writePump(conn *websocket.Conn, c *Conn) {
 				return
 			}
 
+		case <-reverify.C:
+			// 周期性向账号中心复核令牌状态：握手时的鉴权无法感知后续的
+			// 吊销（被踢下线 / 登出 / 改密），不复核的话被踢设备的连接会
+			// 一直存活到自然断开，仍能收到消息。
+			if s.tokenStillValid(c) {
+				continue
+			}
+			s.log.Infow("msg", "令牌已被吊销，主动断开连接",
+				"uid", c.UserID, "connId", c.ConnID, "platform", c.Platform)
+			// 这里不能调用 send：send 只是把帧放入 c.send，而紧接着 Close
+			// 会让 writePump 先选中 c.closed，导致 kicked 帧丢失。直接在唯一
+			// 写协程中写出通知，再发关闭帧，客户端才能停止重连并回到登录态。
+			s.writeAndClose(conn, c, Message{Type: TypeKicked, Data: "登录状态已失效，请重新登录"})
+			c.Close()
+			return
+
 		case <-c.closed:
 			// 连接被要求关闭：发一条关闭帧让客户端立即感知，
 			// 而不是等到 TCP 超时（默认可能长达数分钟）。
@@ -355,6 +402,38 @@ func (s *Server) writePump(conn *websocket.Conn, c *Conn) {
 			return
 		}
 	}
+}
+
+// tokenStillValid 向账号中心复核连接令牌是否仍然有效。
+//
+// 账号中心不可达时按「仍然有效」处理：这是刻意的可用性取舍——
+// 账号中心短暂抖动不应导致全部在线连接被误踢。代价是抖动期间
+// 踢下线动作会延迟到账号中心恢复后才生效。
+func (s *Server) tokenStillValid(c *Conn) bool {
+	remote := s.verifierRemote()
+	if c.token == "" || remote == nil {
+		// 自校验模式（无远程校验）下没有可复核的来源，跳过：
+		// 此时踢下线本就依赖客户端下次握手时被拒，连接级复核无从谈起。
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
+	defer cancel()
+
+	valid, _, err := remote.VerifyToken(ctx, c.token)
+	if err != nil {
+		s.log.Warnw("msg", "复核令牌状态失败（账号中心不可达），暂不断开",
+			"uid", c.UserID, "connId", c.ConnID, "err", err)
+		return true
+	}
+	return valid
+}
+
+// verifierRemote 返回用于复核令牌状态的远程校验器。
+//
+// 通过 Verifier 暴露的接口访问，避免网关直接持有账号中心客户端。
+func (s *Server) verifierRemote() auth.TokenVerifier {
+	return s.verifier.Remote()
 }
 
 // send 把消息投递到连接的发送队列。
@@ -367,6 +446,23 @@ func (s *Server) send(c *Conn, msg Message) {
 	if !c.trySend(payload) {
 		s.log.Warnw("msg", "下行队列已满，丢弃消息", "uid", c.UserID, "connId", c.ConnID)
 	}
+}
+
+// writeAndClose 在 writePump 内同步写出最后一条控制消息，再发送正常关闭帧。
+// 该方法只允许由 writePump 调用，避免违反 gorilla/websocket 的单写协程约束。
+func (s *Server) writeAndClose(conn *websocket.Conn, c *Conn, msg Message) {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		s.log.Errorw("msg", "序列化关闭通知失败", "uid", c.UserID, "err", err)
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
+	if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		s.log.Infow("msg", "WebSocket 关闭通知写入失败", "uid", c.UserID, "connId", c.ConnID, "err", err)
+		return
+	}
+	_ = conn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "token revoked"))
 }
 
 // sendError 向客户端发送错误提示。

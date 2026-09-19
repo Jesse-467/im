@@ -49,6 +49,15 @@ func NewVerifier(secret JWTSecret, remote TokenVerifier, logger klog.Logger) *Ve
 	}
 }
 
+// Remote 返回底层远程校验器，供需要在连接存活期间复核令牌状态的场景使用
+// （如 WebSocket 网关的周期性踢下线检查）。
+//
+// 自校验模式下返回 nil，调用方需判空：nil 表示没有可复核的远程来源，
+// 此时应跳过复核而不是报错。
+func (v *Verifier) Remote() TokenVerifier {
+	return v.remote
+}
+
 // Verify 校验令牌并返回用户 ID。
 //
 // 执行顺序刻意是「先本地、再远程」：

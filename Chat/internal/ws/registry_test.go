@@ -6,7 +6,7 @@ import (
 
 // newTestConn 构造一条用于测试的连接。
 func newTestConn(uid int64, connID string) *Conn {
-	return newConn(uid, "node-test", "test", connID)
+	return newConn(uid, "node-test", "test", connID, "")
 }
 
 // TestRegistryMultiDevice 验证同一用户的多端连接都被保留。

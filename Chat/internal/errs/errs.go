@@ -29,6 +29,12 @@ const (
 	CodeDataExist      = 4004 // 数据已存在
 	CodeTooManyRequest = 4005 // 触发限流
 	CodeForbidden      = 4006 // 无权限
+	// CodeTokenRevoked 表示凭证已被主动吊销（被踢下线 / 登出 / 改密）。
+	//
+	// 与 CodeUnauthorized 区分：后者是「令牌缺失 / 签名错 / 过期」，
+	// 客户端可尝试刷新或重新登录；本码是「令牌本身合法但已被作废」，
+	// 客户端应直接回到登录态，任何重试都只会再次被拒。
+	CodeTokenRevoked = 4007 // 凭证已被吊销
 
 	CodeServerError  = 5000 // 服务端内部错误
 	CodeDBError      = 5001 // 数据库操作异常
@@ -47,6 +53,7 @@ var codeText = map[uint32]string{
 	CodeDataExist:      "数据已存在",
 	CodeTooManyRequest: "操作过于频繁，请稍后重试",
 	CodeForbidden:      "没有操作权限",
+	CodeTokenRevoked:   "登录状态已失效，请重新登录",
 	CodeServerError:    "服务繁忙，请稍后重试",
 	CodeDBError:        "数据操作异常",
 	CodeCacheError:     "缓存操作异常",

@@ -100,6 +100,13 @@ type Conn struct {
 	// ConnID 连接唯一标识，用于精确定位与踢下线
 	ConnID string
 
+	// token 是建立连接时使用的访问令牌。
+	//
+	// 保存它是为了「连接级周期重校验」：握手时鉴权一次并不能感知
+	// 后续的令牌吊销（被踢下线 / 登出 / 改密），网关需要在连接存活期间
+	// 定期向账号中心复核，发现被吊销即主动断开。
+	token string
+
 	// send 是下行消息队列。
 	// 所有下行都走这个队列，由唯一的写协程消费——
 	// gorilla/websocket 不允许并发写，集中到一个协程是唯一安全的做法。
@@ -119,12 +126,13 @@ type Conn struct {
 }
 
 // newConn 创建连接。
-func newConn(userID int64, nodeID, platform, connID string) *Conn {
+func newConn(userID int64, nodeID, platform, connID, token string) *Conn {
 	c := &Conn{
 		UserID:   userID,
 		NodeID:   nodeID,
 		Platform: platform,
 		ConnID:   connID,
+		token:    token,
 		send:     make(chan []byte, sendBufferSize),
 		closed:   make(chan struct{}),
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -170,10 +171,15 @@ func requireAuth(verifier *auth.Verifier) gin.HandlerFunc {
 
 		uid, err := verifier.Verify(ctx.Request.Context(), token)
 		if err != nil {
-			// 令牌无效与「无法确认令牌状态」对外都按未认证处理。
-			// 后者虽然本质是服务端故障，但放行是不可接受的（fail-closed），
-			// 细节已由 Verifier 记入日志。
-			httpx.Fail(ctx, errs.Wrap(err, errs.CodeUnauthorized, ""))
+			// 区分「凭证被吊销」与「令牌无效/过期」：前者（被踢下线 / 登出 / 改密）
+			// 用 CodeTokenRevoked 告知客户端直接回到登录态，后者按未认证处理。
+			// 「无法确认令牌状态」虽然本质是服务端故障，但放行是不可接受的
+			// （fail-closed），细节已由 Verifier 记入日志。
+			if errors.Is(err, auth.ErrTokenRevoked) {
+				httpx.Fail(ctx, errs.Wrap(err, errs.CodeTokenRevoked, ""))
+			} else {
+				httpx.Fail(ctx, errs.Wrap(err, errs.CodeUnauthorized, ""))
+			}
 			ctx.Abort()
 			return
 		}

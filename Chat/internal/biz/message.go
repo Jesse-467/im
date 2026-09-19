@@ -155,6 +155,13 @@ type MessageRepo interface {
 	// 实现必须用条件更新（status = 正常）保证只有一次撤回能生效，
 	// 同时限定 sender_id 防止撤回他人消息。
 	Recall(ctx context.Context, conversationID, messageID, operatorID int64) (bool, error)
+
+	// FindBySeq 按会话与序号反查单条消息，供「按 seq 撤回」定位 messageID。
+	//
+	// 与 ListBySeqRange 的区别：本方法精确命中唯一一条（走 uk_message_conv_seq
+	// 唯一索引），用于已知确切位点的反查；区间拉取面向翻页场景。
+	// 查不到时返回 (nil, nil)，由调用方按「消息不存在」处理。
+	FindBySeq(ctx context.Context, conversationID, seq int64) (*Message, error)
 }
 
 // MessageUseCase 承载消息领域的用例。
