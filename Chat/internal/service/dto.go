@@ -1,7 +1,9 @@
 package service
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -27,8 +29,14 @@ import (
 // 旧客户端把服务端返回的 groupId 原样回传即可正常工作，因此无需强制升级。
 
 // conversationRef 是可嵌入请求 DTO 的会话标识引用。
+//
+// ConversationID 类型是 int64 而非 string，但支持从 JSON 字符串解码：
+// 19 位雪花 ID 超出 JavaScript 的 Number.MAX_SAFE_INTEGER，浏览器用
+// JSON.parse 读服务端下发的 ID 时会被静默舍入，于是通常把 ID 当字符串传递。
+// 若只接受数字，这类请求会解码失败或落到 0，表现为「接口返回成功但数据为空」
+// 或「会话不存在」——而问题只在 ID 足够大时出现，极难定位。
 type conversationRef struct {
-	ConversationID int64  `json:"conversationId"`
+	ConversationID bigID  `json:"conversationId"`
 	GroupID        string `json:"groupId"`
 }
 
@@ -36,10 +44,39 @@ type conversationRef struct {
 //
 // 由 handler 显式传入 svc：DTO 不该依赖框架上下文，显式传参让数据流向一目了然。
 func (r conversationRef) resolve(svc *ChatService, ctx *gin.Context) (int64, error) {
-	if r.ConversationID > 0 {
-		return r.ConversationID, nil
+	if id := int64(r.ConversationID); id > 0 {
+		return id, nil
 	}
 	return svc.convUC.ResolveConversationID(ctx.Request.Context(), r.GroupID)
+}
+
+// bigID 是可以从 JSON 数字或字符串解码的 int64。
+//
+// 用于承载雪花 ID 这类超出前端安全整数范围的标识：两种字面量都接受，
+// 且字符串形式能保留完整精度（数字形式在解析前就已在前端被舍入）。
+type bigID int64
+
+// UnmarshalJSON 兼容数字与字符串两种写法。
+func (b *bigID) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "" || s == "null" {
+		*b = 0
+		return nil
+	}
+	// 字符串形式：去掉两侧引号后按十进制解析
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+		if s == "" {
+			*b = 0
+			return nil
+		}
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("会话 ID 必须是整数或整数字符串，收到 %s", data)
+	}
+	*b = bigID(v)
+	return nil
 }
 
 // groupIDOf 把会话 ID 转换为对外的字符串标识。

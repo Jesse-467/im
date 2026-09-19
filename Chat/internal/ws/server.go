@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -62,16 +63,79 @@ type Server struct {
 type UpstreamHandler func(ctx context.Context, userID int64, msg *UpstreamMessage) error
 
 // UpstreamMessage 是客户端上行消息。
+//
+// 会话标识刻意设计成「数字优先、字符串兜底」的双字段：
+// conversationId 是 19 位雪花 ID，超出 JavaScript 的 Number.MAX_SAFE_INTEGER，
+// 浏览器端用 JSON.parse 读服务端下发的 ID 时会被静默舍入，再回传就成了另一个
+// 不存在的会话。因此客户端可以把 ID 当字符串原样回填到 conversationId 字段
+// （JSON 里数字与字符串是不同的字面量，故需要独立字段承载），服务端两种都收。
 type UpstreamMessage struct {
 	// Type 上行类型：send（发送消息）/ ping（心跳）
 	Type string `json:"type"`
-	// 以下字段用于发送消息
-	ConversationID int64  `json:"conversationId"`
-	GroupID        string `json:"groupId"`
-	Content        string `json:"content"`
-	MsgType        int32  `json:"msgType"`
-	ClientMsgID    string `json:"clientMsgId"`
-	Extra          string `json:"extra"`
+	// ConversationID 数字形式的会话 ID
+	ConversationID int64 `json:"conversationId"`
+	// ConversationIDStr 字符串形式的会话 ID，用于规避前端浮点精度丢失。
+	//
+	// 与 GroupID 的区别：GroupID 是"按业务规则解析会话"的历史入口
+	// （如 minUid_maxUid），而本字段是"精确的会话主键"，直接使用不做事后解析。
+	ConversationIDStr string `json:"conversationIdStr"`
+	GroupID           string `json:"groupId"`
+	Content           string `json:"content"`
+	MsgType           int32  `json:"msgType"`
+	ClientMsgID       string `json:"clientMsgId"`
+	Extra             string `json:"extra"`
+}
+
+// ResolveConversationID 返回本次上行消息的目标会话 ID（数字形式，0 表示未提供）。
+//
+// 同时接受 conversationId 的字符串字面量：部分 JSON 序列化实现会把大整数
+// 编码为字符串（Go 侧解析到字符串字段同样能得到精确值），这不是错误格式，
+// 因此不做报错处理。
+func (m *UpstreamMessage) ResolveConversationID() (int64, error) {
+	if m.ConversationID > 0 {
+		return m.ConversationID, nil
+	}
+	if m.ConversationIDStr != "" {
+		id, err := strconv.ParseInt(strings.TrimSpace(m.ConversationIDStr), 10, 64)
+		if err != nil || id <= 0 {
+			return 0, fmt.Errorf("conversationIdStr 不是合法的会话 ID: %q", m.ConversationIDStr)
+		}
+		return id, nil
+	}
+	return 0, nil
+}
+
+// UnmarshalJSON 兼容 conversationId 的两种编码。
+//
+// 标准解码只接受数字，但把大整数写成字符串是业界常见做法（许多网关与
+// 序列化库默认如此）。若不兼容，客户端会收到"消息格式不正确"这种
+// 指向不明的报错，且问题只在 ID 超过 2^53 时才会出现，极难定位。
+func (m *UpstreamMessage) UnmarshalJSON(data []byte) error {
+	// 用别名类型避免递归调用本方法
+	type alias UpstreamMessage
+	var raw struct {
+		alias
+		ConversationID json.RawMessage `json:"conversationId"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = UpstreamMessage(raw.alias)
+
+	if len(raw.ConversationID) == 0 || string(raw.ConversationID) == "null" {
+		return nil
+	}
+	// 数字形式：直接交给标准解码
+	if err := json.Unmarshal(raw.ConversationID, &m.ConversationID); err == nil {
+		return nil
+	}
+	// 字符串形式：去掉引号后按十进制解析
+	var s string
+	if err := json.Unmarshal(raw.ConversationID, &s); err != nil {
+		return fmt.Errorf("conversationId 既不是数字也不是字符串: %s", raw.ConversationID)
+	}
+	m.ConversationIDStr = s
+	return nil
 }
 
 // NewServer 构造 WebSocket 网关。

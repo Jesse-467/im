@@ -31,7 +31,7 @@ func (s *ChatService) HandleUpstream(ctx context.Context, userID int64, msg *ws.
 
 // handleWSSend 处理经 WebSocket 发送消息。
 func (s *ChatService) handleWSSend(ctx context.Context, userID int64, msg *ws.UpstreamMessage) error {
-	convID, err := s.resolveConvID(ctx, msg.ConversationID, msg.GroupID)
+	convID, err := s.resolveUpstreamConvID(ctx, msg)
 	if err != nil {
 		return toErrs(err)
 	}
@@ -59,10 +59,17 @@ func (s *ChatService) handleWSSend(ctx context.Context, userID int64, msg *ws.Up
 	return nil
 }
 
-// resolveConvID 解析会话标识，兼容数字 ID 与历史字符串形式。
-func (s *ChatService) resolveConvID(ctx context.Context, conversationID int64, groupID string) (int64, error) {
-	if conversationID > 0 {
-		return conversationID, nil
+// resolveUpstreamConvID 解析上行消息的目标会话。
+//
+// 解析顺序体现优先级：精确的会话主键（数字或字符串形式）优先，
+// groupId 作为兼容旧客户端的兜底入口。
+func (s *ChatService) resolveUpstreamConvID(ctx context.Context, msg *ws.UpstreamMessage) (int64, error) {
+	convID, err := msg.ResolveConversationID()
+	if err != nil {
+		return 0, biz.ErrInvalidParam
 	}
-	return s.convUC.ResolveConversationID(ctx, groupID)
+	if convID > 0 {
+		return convID, nil
+	}
+	return s.convUC.ResolveConversationID(ctx, msg.GroupID)
 }
