@@ -47,7 +47,11 @@ go.work.sum
 *.log
 *.log.*
 
-# ── 文档：忽略散落 md，仅保留根级两份受控文档 ──
+# ── 文档：忽略散落 md，仅保留根级三份受控文档 ──
+# README     总体说明（架构、部署、配置）
+# index      接口索引与业务链路（对外契约的唯一入口）
+# REFACTOR_PLAN  重构章程与决策记录
 *.md
 !/README.md
+!/index.md
 !/REFACTOR_PLAN.md
