@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/ws"
@@ -37,19 +36,26 @@ func (s *ChatService) handleWSSend(ctx context.Context, userID int64, msg *ws.Up
 		return toErrs(err)
 	}
 
-	res, err := s.msgUC.Send(ctx, &biz.SendMessageRequest{
+	// 只负责「落库」，不在此处回推给发送者。
+	//
+	// 回推由消息消费者统一完成（它会给会话全部成员含发送者推送完整消息体）。
+	// 若这里也推一条回执，发送者会在同一毫秒内收到两条内容不同但指向同一
+	// 消息的推送（一条是精简回执、一条是完整消息），客户端必须自行去重——
+	// 这是把「确认」与「广播」拆开造成的冗余。
+	//
+	// 代价是发送者要等一次 Outbox 投递往返才能确认，
+	// 换来的是客户端逻辑简单且不会重复渲染。
+	if _, err := s.msgUC.Send(ctx, &biz.SendMessageRequest{
 		ConversationID: convID,
 		SenderID:       userID,
 		Type:           msg.MsgType,
 		Content:        msg.Content,
 		Extra:          msg.Extra,
 		ClientMsgID:    msg.ClientMsgID,
-	})
-	if err != nil {
+	}); err != nil {
 		return toErrs(err)
 	}
 
-	s.pushSendAck(userID, convID, res)
 	return nil
 }
 
@@ -60,51 +66,3 @@ func (s *ChatService) resolveConvID(ctx context.Context, conversationID int64, g
 	}
 	return s.convUC.ResolveConversationID(ctx, groupID)
 }
-
-// pushSendAck 把发送结果回推给发送者本人。
-//
-// 为什么要回推：客户端据此确认消息已落库，并拿到服务端分配的
-// 消息 ID 与 seq 写入本地。若省略这一步，发送方要等下一次拉取
-// 才能知道自己的消息序号，表现为「自己发的消息排序位置不确定」。
-//
-// 刻意只推给发送者本人：其他成员的推送由消息消费者完成，
-// 这里若一并推送会导致发送方所在会话的其他成员收到重复消息。
-func (s *ChatService) pushSendAck(userID, convID int64, res *biz.SendResult) {
-	if s.pusher == nil || res == nil || res.Message == nil {
-		return
-	}
-
-	s.pusher.PushToUser(userID, ws.Message{
-		Type: ws.TypeMessage,
-		Data: sendAckPayload{
-			ConversationID: convID,
-			MessageID:      res.Message.ID,
-			Seq:            res.Message.Seq,
-			ClientMsgID:    res.Message.ClientMsgID,
-			Duplicated:     res.Duplicated,
-			CreateTime:     res.Message.CreatedAt.UnixMilli(),
-		},
-	})
-}
-
-// sendAckPayload 是发送回执的下行载荷。
-type sendAckPayload struct {
-	ConversationID int64  `json:"conversationId"`
-	MessageID      int64  `json:"messageId"`
-	Seq            int64  `json:"seq"`
-	ClientMsgID    string `json:"clientMsgId"`
-	Duplicated     bool   `json:"duplicated"`
-	CreateTime     int64  `json:"createTime"`
-}
-
-// Pusher 是下行推送能力。
-//
-// 定义成接口而非直接依赖 ws.Registry：service 包因此不需要知道
-// 连接管理的实现细节，单测时可以替换为记录型假实现来断言推送内容。
-type Pusher interface {
-	// PushToUser 向指定用户在本节点的全部连接推送消息
-	PushToUser(userID int64, msg ws.Message)
-}
-
-// 用编译期断言确保 json 包被使用（载荷序列化在 ws 层完成）
-var _ = json.Marshal

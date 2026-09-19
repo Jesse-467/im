@@ -161,6 +161,24 @@ func (r *messageRepo) Recall(ctx context.Context, conversationID, messageID, ope
 	return res.RowsAffected == 1, nil
 }
 
+// LoadMessage 按会话与序号装载单条消息。
+//
+// 供消息消费者使用：投递事件里只有 (conversationId, seq)，
+// 推送时需要完整消息体。走 uk_message_conv_seq 唯一索引，开销可控。
+func (r *messageRepo) LoadMessage(ctx context.Context, conversationID, seq int64) (*biz.Message, error) {
+	var m messageModel
+	err := r.data.conn(ctx).
+		Where("conversation_id = ? AND seq = ?", conversationID, seq).
+		First(&m).Error
+	if err != nil {
+		if isRecordNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("data: 按序号装载消息失败: %w", err)
+	}
+	return toBizMessage(&m), nil
+}
+
 // ── Outbox ──────────────────────────────────────────────────────────────────
 
 // Outbox 状态

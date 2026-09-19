@@ -117,15 +117,7 @@ func (r *Relay) deliver(ctx context.Context, ev *biz.OutboxEvent) {
 
 // handleFailure 处理投递失败：安排退避重试，超过上限则落地为失败。
 func (r *Relay) handleFailure(ctx context.Context, ev *biz.OutboxEvent, cause error) {
-	// 退避时长随重试次数指数增长，并设上限
-	backoff := baseBackoff
-	if ev.RetryCount > 0 {
-		if d := baseBackoff << uint(min(ev.RetryCount, 8)); d < maxBackoff {
-			backoff = d
-		} else {
-			backoff = maxBackoff
-		}
-	}
+	backoff := Backoff(ev.RetryCount)
 
 	if err := r.outbox.MarkFailed(ctx, ev.EventID, cause.Error(), time.Now().Add(backoff)); err != nil {
 		r.log.Errorw("msg", "标记事件投递失败时出错", "eventId", ev.EventID, "err", err)
@@ -143,4 +135,28 @@ func (r *Relay) handleFailure(ctx context.Context, ev *biz.OutboxEvent, cause er
 
 	r.log.Warnw("msg", "事件投递失败，已安排重试",
 		"eventId", ev.EventID, "retryCount", ev.RetryCount+1, "backoff", backoff.String(), "err", cause)
+}
+
+// Backoff 计算第 retryCount 次重试前的退避时长。
+//
+// 退避随重试次数指数增长并设有上限：
+//   - 指数增长让下游有足够时间恢复，避免持续高压；
+//   - 上限避免退避时间无限膨胀，最终导致消息实际上被永久搁置。
+//
+// 单独导出是为了可被单元测试直接验证——退避策略算错会直接表现为
+// 「重试过于频繁打垮下游」或「重试几乎不发生」，两者都不易在现场察觉。
+func Backoff(retryCount int) time.Duration {
+	if retryCount <= 0 {
+		return baseBackoff
+	}
+	// 左移次数设上限，避免 retryCount 很大时溢出
+	shift := retryCount
+	if shift > 20 {
+		shift = 20
+	}
+	d := baseBackoff << uint(shift)
+	if d <= 0 || d > maxBackoff {
+		return maxBackoff
+	}
+	return d
 }

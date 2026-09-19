@@ -10,6 +10,7 @@ import (
 	"context"
 	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/conf"
+	"github.com/Jesse-467/im/Chat/internal/consumer"
 	"github.com/Jesse-467/im/Chat/internal/data"
 	"github.com/Jesse-467/im/Chat/internal/mq"
 	"github.com/Jesse-467/im/Chat/internal/relay"
@@ -52,11 +53,11 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 	messageTopic := biz.ProvideMessageTopic(cfg)
 	messageUseCase := biz.NewMessageUseCase(messageRepo, conversationRepo, conversationUseCase, seqAllocator, idGenerator, messageTopic, logger)
 	chatService := service.NewChatService(conversationUseCase, friendUseCase, groupUseCase, messageUseCase, cfg, logger)
-	registry := ws.NewRegistry(logger)
 	universalClient := data.ProvideCache(dataData)
 	nodeID := data.NewNodeID(cfg)
 	nodeName := ws.ProvideNodeName(nodeID)
 	presence := ws.NewPresence(universalClient, nodeName, logger)
+	registry := ws.NewRegistry(presence, logger)
 	wsServer := newWSServer(cfg, registry, presence, generator, chatService, logger)
 	postgresChecker := data.NewPostgresChecker(dataData)
 	redisChecker := data.NewRedisChecker(dataData)
@@ -70,8 +71,18 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 		return nil, nil, err
 	}
 	relay := newRelay(outboxRepo, publisher, logger)
-	app := newApp(cfg, logger, httpServer, wsServer, relay)
+	eventLoader := consumer.ProvideEventLoader(messageRepo)
+	consumerConsumer := newConsumer(conversationRepo, eventLoader, registry, logger)
+	subscriber, cleanup4, err := mq.NewSubscriber(cfg, logger)
+	if err != nil {
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	app := newApp(cfg, logger, httpServer, wsServer, relay, consumerConsumer, subscriber, publisher, registry)
 	return app, func() {
+		cleanup4()
 		cleanup3()
 		cleanup2()
 		cleanup()
@@ -80,21 +91,29 @@ func initApp(cfg *conf.Config, logger log.Logger) (*kratos.App, func(), error) {
 
 // wire.go:
 
+// newConsumer 构造消息消费者。
+//
+// 显式组装的原因：消费者需要一个「只暴露推送与本地在线判断」的窄接口，
+// 而 ws.Registry 的方法集更大。在这里做一次收窄，
+// 可以让 consumer 包不必认识连接注册中心的完整能力。
+func newConsumer(
+	convRepo biz.ConversationRepo,
+	loader consumer.EventLoader,
+	registry *ws.Registry,
+	logger log.Logger,
+) *consumer.Consumer {
+	return consumer.New(convRepo, loader, registry, logger)
+}
+
 // newRelay 构造 Outbox 投递协程。
 func newRelay(outbox biz.OutboxRepo, pub mq.Publisher, logger log.Logger) *relay.Relay {
 	return relay.New(outbox, pub, logger)
 }
 
-// newWSServer 构造 WebSocket 网关，并把下行推送能力回注给业务服务。
+// newWSServer 构造 WebSocket 网关。
 //
-// 这里存在一个双向依赖：网关需要 ChatService 处理上行消息，
-// 而 ChatService 需要网关推送下行消息。用显式装配函数打破：
-// 先构造网关（此时它的 handler 由闭包延迟绑定），
-// 再把网关作为 Pusher 注入 ChatService。
-//
-// 之所以不在构造函数里互相传入：那会形成无法解开的环；
-// 用延迟绑定可以让依赖方向在运行时单向化，也让「推送是可选能力」
-// 这一事实在代码结构上直接可见。
+// 网关需要 ChatService 作为上行处理器；下行推送则全部由消息消费者完成，
+// 因此依赖方向是单向的（ws → service），无需打破循环。
 func newWSServer(
 	cfg *conf.Config,
 	registry *ws.Registry,
@@ -103,34 +122,49 @@ func newWSServer(
 	chatSvc *service.ChatService,
 	logger log.Logger,
 ) *ws.Server {
-	srv := ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
-
-	chatSvc.SetPusher(registry)
-	return srv
+	return ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
 }
 
 // newApp 组装 Kratos 应用。
 //
-// 投递协程通过 Kratos 的生命周期钩子接入：
+// 后台协程通过 Kratos 的生命周期钩子接入：
 //   - AfterStart 在传输层就绪后启动，避免服务还没能接受请求就开始推送；
-//   - BeforeStop 在传输层关闭前取消，让当前这一轮投递有机会收尾，
-//     而不是在投递途中被强杀、留下状态不明的事件。
+//   - BeforeStop 在传输层关闭前取消，让当前这一轮处理有机会收尾，
+//     而不是在处理途中被强杀、留下状态不明的事件。
 func newApp(
 	cfg *conf.Config,
 	logger log.Logger,
 	hs *server.HTTPServer,
 	wsSrv *ws.Server,
 	r *relay.Relay,
+	c *consumer.Consumer,
+	sub mq.Subscriber,
+	pub mq.Publisher,
+	registry *ws.Registry,
 ) *kratos.App {
 
-	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	bgCtx, cancelBg := context.WithCancel(context.Background())
+
+	if lp, ok := pub.(*mq.LogPublisher); ok {
+		lp.RegisterHandler(c.Handle)
+	}
 
 	return kratos.New(kratos.Name(cfg.ServiceName), kratos.Version(Version), kratos.Logger(logger), kratos.StopTimeout(15*time.Second), kratos.Server(hs, wsSrv), kratos.AfterStart(func(_ context.Context) error {
-		go r.Run(relayCtx)
+
+		go r.Run(bgCtx)
+
+		if _, isLog := pub.(*mq.LogPublisher); !isLog {
+			go func() {
+				topic := cfg.MQ.MessageTopic()
+				if err := sub.Subscribe(bgCtx, topic, registry.NodeID(), c.Handle); err != nil {
+					log.NewHelper(logger).Errorw("msg", "消息订阅退出", "err", err)
+				}
+			}()
+		}
 		return nil
 	}), kratos.BeforeStop(func(_ context.Context) error {
 
-		cancelRelay()
+		cancelBg()
 		return nil
 	}),
 	)

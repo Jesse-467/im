@@ -19,17 +19,24 @@ type Registry struct {
 	// 网页上登录，消息要投给全部端。若只保留最后一条，先登录的端会静默收不到消息。
 	conns map[int64]map[string]*Conn
 
+	// nodeID 是本节点标识，用于跨节点路由与消费者组命名
+	nodeID string
+
 	mu  sync.RWMutex
 	log *klog.Helper
 }
 
 // NewRegistry 构造连接注册中心。
-func NewRegistry(logger klog.Logger) *Registry {
+func NewRegistry(presence *Presence, logger klog.Logger) *Registry {
 	return &Registry{
-		conns: make(map[int64]map[string]*Conn),
-		log:   klog.NewHelper(klog.With(logger, "module", "ws/registry")),
+		conns:  make(map[int64]map[string]*Conn),
+		nodeID: presence.NodeID(),
+		log:    klog.NewHelper(klog.With(logger, "module", "ws/registry")),
 	}
 }
+
+// NodeID 返回本节点标识。
+func (r *Registry) NodeID() string { return r.nodeID }
 
 // Add 注册一条连接。
 func (r *Registry) Add(c *Conn) {

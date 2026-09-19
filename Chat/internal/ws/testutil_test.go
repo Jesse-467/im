@@ -17,3 +17,15 @@ type discard struct{}
 
 // Write 丢弃数据并报告全部写入成功。
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// testNodeID 是测试用的节点标识。
+const testNodeID = "node-test"
+
+// newTestRegistry 构造不依赖 Redis 的注册中心。
+//
+// Registry 只需要从 Presence 读取节点 ID，其余能力（跨节点路由）在
+// 单节点测试中不会被触发。因此这里直接构造一个只带 nodeID 的
+// Presence 即可，无需启动 Redis——否则连接管理的单元测试会依赖外部服务。
+func newTestRegistry() *Registry {
+	return NewRegistry(&Presence{nodeID: testNodeID, log: klog.NewHelper(newTestLogger())}, newTestLogger())
+}

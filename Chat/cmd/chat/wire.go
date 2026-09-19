@@ -13,6 +13,7 @@ import (
 
 	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/conf"
+	"github.com/Jesse-467/im/Chat/internal/consumer"
 	"github.com/Jesse-467/im/Chat/internal/data"
 	"github.com/Jesse-467/im/Chat/internal/mq"
 	"github.com/Jesse-467/im/Chat/internal/relay"
@@ -30,11 +31,28 @@ func initApp(cfg *conf.Config, logger klog.Logger) (*kratos.App, func(), error) 
 		service.ProviderSet,
 		server.ProviderSet,
 		ws.ProviderSet,
+		consumer.ProviderSet,
 		mq.NewPublisher,
+		mq.NewSubscriber,
 		newRelay,
 		newWSServer,
+		newConsumer,
 		newApp,
 	))
+}
+
+// newConsumer 构造消息消费者。
+//
+// 显式组装的原因：消费者需要一个「只暴露推送与本地在线判断」的窄接口，
+// 而 ws.Registry 的方法集更大。在这里做一次收窄，
+// 可以让 consumer 包不必认识连接注册中心的完整能力。
+func newConsumer(
+	convRepo biz.ConversationRepo,
+	loader consumer.EventLoader,
+	registry *ws.Registry,
+	logger klog.Logger,
+) *consumer.Consumer {
+	return consumer.New(convRepo, loader, registry, logger)
 }
 
 // newRelay 构造 Outbox 投递协程。
@@ -42,16 +60,10 @@ func newRelay(outbox biz.OutboxRepo, pub mq.Publisher, logger klog.Logger) *rela
 	return relay.New(outbox, pub, logger)
 }
 
-// newWSServer 构造 WebSocket 网关，并把下行推送能力回注给业务服务。
+// newWSServer 构造 WebSocket 网关。
 //
-// 这里存在一个双向依赖：网关需要 ChatService 处理上行消息，
-// 而 ChatService 需要网关推送下行消息。用显式装配函数打破：
-// 先构造网关（此时它的 handler 由闭包延迟绑定），
-// 再把网关作为 Pusher 注入 ChatService。
-//
-// 之所以不在构造函数里互相传入：那会形成无法解开的环；
-// 用延迟绑定可以让依赖方向在运行时单向化，也让「推送是可选能力」
-// 这一事实在代码结构上直接可见。
+// 网关需要 ChatService 作为上行处理器；下行推送则全部由消息消费者完成，
+// 因此依赖方向是单向的（ws → service），无需打破循环。
 func newWSServer(
 	cfg *conf.Config,
 	registry *ws.Registry,
@@ -60,27 +72,34 @@ func newWSServer(
 	chatSvc *service.ChatService,
 	logger klog.Logger,
 ) *ws.Server {
-	srv := ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
-	// 把网关作为推送实现注入业务服务，完成双向连接的闭环
-	chatSvc.SetPusher(registry)
-	return srv
+	return ws.NewServer(cfg, registry, presence, gen, chatSvc.HandleUpstream, logger)
 }
 
 // newApp 组装 Kratos 应用。
 //
-// 投递协程通过 Kratos 的生命周期钩子接入：
+// 后台协程通过 Kratos 的生命周期钩子接入：
 //   - AfterStart 在传输层就绪后启动，避免服务还没能接受请求就开始推送；
-//   - BeforeStop 在传输层关闭前取消，让当前这一轮投递有机会收尾，
-//     而不是在投递途中被强杀、留下状态不明的事件。
+//   - BeforeStop 在传输层关闭前取消，让当前这一轮处理有机会收尾，
+//     而不是在处理途中被强杀、留下状态不明的事件。
 func newApp(
 	cfg *conf.Config,
 	logger klog.Logger,
 	hs *server.HTTPServer,
 	wsSrv *ws.Server,
 	r *relay.Relay,
+	c *consumer.Consumer,
+	sub mq.Subscriber,
+	pub mq.Publisher,
+	registry *ws.Registry,
 ) *kratos.App {
-	// relayCtx 的生命周期与应用绑定：cancel 在退出时调用
-	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	// 后台协程的生命周期与应用绑定：cancel 在退出时调用
+	bgCtx, cancelBg := context.WithCancel(context.Background())
+
+	// 日志模式没有真实队列，把消费者直接注册到发布者上，
+	// 使「发送 → 落库 → 投递 → 消费 → 推送」在无中间件时也能完整跑通。
+	if lp, ok := pub.(*mq.LogPublisher); ok {
+		lp.RegisterHandler(c.Handle)
+	}
 
 	return kratos.New(
 		kratos.Name(cfg.ServiceName),
@@ -90,12 +109,25 @@ func newApp(
 		kratos.StopTimeout(15*time.Second),
 		kratos.Server(hs, wsSrv),
 		kratos.AfterStart(func(_ context.Context) error {
-			go r.Run(relayCtx)
+			// 生产侧：把 Outbox 事件搬到消息队列
+			go r.Run(bgCtx)
+
+			// 消费侧：Kafka 模式下由订阅协程从队列消费。
+			// 消费者组按节点隔离：每个实例都要收到全量消息，
+			// 才能把消息推给自己节点上的在线用户。
+			if _, isLog := pub.(*mq.LogPublisher); !isLog {
+				go func() {
+					topic := cfg.MQ.MessageTopic()
+					if err := sub.Subscribe(bgCtx, topic, registry.NodeID(), c.Handle); err != nil {
+						klog.NewHelper(logger).Errorw("msg", "消息订阅退出", "err", err)
+					}
+				}()
+			}
 			return nil
 		}),
 		kratos.BeforeStop(func(_ context.Context) error {
-			// 先停投递，再关传输层：避免在服务已经不可用时还在产生新的推送
-			cancelRelay()
+			// 先停后台协程，再关传输层：避免在服务已经不可用时还在产生新的推送
+			cancelBg()
 			return nil
 		}),
 	)

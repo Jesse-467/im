@@ -38,3 +38,21 @@ func NewPublisher(c *conf.Config, logger klog.Logger) (Publisher, func(), error)
 		return nil, nil, fmt.Errorf("mq: 不支持的 MQ_TYPE=%q，可选 %s | %s", c.MQ.Type, TypeKafka, TypeLog)
 	}
 }
+
+// NewSubscriber 按配置选择订阅实现。
+func NewSubscriber(c *conf.Config, logger klog.Logger) (Subscriber, func(), error) {
+	switch c.MQ.Type {
+	case TypeKafka:
+		return NewKafkaSubscriber(c, logger)
+
+	case TypeLog, "":
+		if c.IsProd() {
+			return nil, nil, fmt.Errorf("mq: 生产环境不允许使用 %q 类型的订阅实现，请配置 MQ_TYPE=kafka", TypeLog)
+		}
+		s := NewLogSubscriber(logger)
+		return s, func() { _ = s.Close() }, nil
+
+	default:
+		return nil, nil, fmt.Errorf("mq: 不支持的 MQ_TYPE=%q，可选 %s | %s", c.MQ.Type, TypeKafka, TypeLog)
+	}
+}

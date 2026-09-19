@@ -23,10 +23,6 @@ type ChatService struct {
 	friendUC *biz.FriendUseCase
 	groupUC  *biz.GroupUseCase
 	msgUC    *biz.MessageUseCase
-	// pusher 是下行推送能力，由 WebSocket 网关实现。
-	// 允许为 nil：未启用 WS 时（如纯 HTTP 部署）推送静默跳过，
-	// 客户端仍可通过拉取接口获取消息。
-	pusher Pusher
 
 	cfg *conf.Config
 	log *klog.Helper
@@ -50,14 +46,6 @@ func NewChatService(
 		log:      klog.NewHelper(klog.With(logger, "module", "service/chat")),
 	}
 }
-
-// SetPusher 注入下行推送能力。
-//
-// 用 setter 而非构造函数参数：推送能力由 WebSocket 网关提供，
-// 而网关又需要 ChatService 作为上行处理器，两者互相依赖。
-// 若都放进构造函数会形成循环依赖，用 setter 打破这个环，
-// 且语义清晰——推送是可选能力，不是构造前提。
-func (s *ChatService) SetPusher(p Pusher) { s.pusher = p }
 
 // toErrs 把领域错误翻译为对外错误码。
 //

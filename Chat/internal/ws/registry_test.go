@@ -15,7 +15,7 @@ func newTestConn(uid int64, connID string) *Conn {
 // 后登录的端会覆盖先登录的，表现为「手机上登录后，网页端再也收不到消息」——
 // 这类问题在单端测试中完全测不出来。
 func TestRegistryMultiDevice(t *testing.T) {
-	r := NewRegistry(newTestLogger())
+	r := newTestRegistry()
 
 	c1 := newTestConn(100, "conn-1")
 	c2 := newTestConn(100, "conn-2")
@@ -34,7 +34,7 @@ func TestRegistryMultiDevice(t *testing.T) {
 
 // TestRegistryDeliverToAllDevices 验证消息投递到该用户的全部端。
 func TestRegistryDeliverToAllDevices(t *testing.T) {
-	r := NewRegistry(newTestLogger())
+	r := newTestRegistry()
 
 	for _, id := range []string{"c1", "c2"} {
 		r.Add(newTestConn(200, id))
@@ -59,7 +59,7 @@ func TestRegistryDeliverToAllDevices(t *testing.T) {
 
 // TestRegistryRemoveKeepsOtherDevices 验证断开一端不影响其他端。
 func TestRegistryRemoveKeepsOtherDevices(t *testing.T) {
-	r := NewRegistry(newTestLogger())
+	r := newTestRegistry()
 
 	c1 := newTestConn(300, "c1")
 	c2 := newTestConn(300, "c2")
@@ -78,7 +78,7 @@ func TestRegistryRemoveKeepsOtherDevices(t *testing.T) {
 //
 // 若不清理，长期运行后注册表会残留大量空 map，造成内存泄漏。
 func TestRegistryRemoveCleansUpUserEntry(t *testing.T) {
-	r := NewRegistry(newTestLogger())
+	r := newTestRegistry()
 
 	c := newTestConn(400, "c1")
 	r.Add(c)
@@ -150,7 +150,7 @@ func TestConnTouchUpdatesTime(t *testing.T) {
 //
 // 用 -race 运行时才能发现数据竞争，是所有并发代码的基础防线。
 func TestRegistryConcurrentAccess(t *testing.T) {
-	r := NewRegistry(newTestLogger())
+	r := newTestRegistry()
 
 	const workers = 8
 	const perWorker = 20
