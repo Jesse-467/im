@@ -1,6 +1,13 @@
 /* ============================================================================
    移动端（安卓 / 窄窗口）适配
    断点 720px：功能条沉底为 tab bar，消息页单栏切换，桌面专属控件隐藏。
+
+   面向现代设备（Android 15+ / HyperOS 2，如红米 K80：2K 120Hz 长屏、
+   居中挖孔、手势导航）：
+   - Capacitor SystemBars 以 'css' 模式处理 insets：WebView ≥140 时
+     env(safe-area-inset-*) 返回真实值，页面沉浸延伸至系统栏后面；
+     旧版 WebView 由原生 padding 兜底，此时 env() 为 0，不会双重留白。
+   - 高度统一用 dvh（键盘弹起时视口收缩，布局随之压缩而非被遮）。
    ========================================================================== */
 
 /* 返回按钮：仅移动端显示（桌面端会话列表与聊天面板并列可见） */
@@ -24,7 +31,14 @@
   /* ── 主框架：标题栏 + 内容 + 底部 tab ─────────────────────────────── */
 
   .shell {
+    height: 100vh;
     height: 100dvh;
+    /* 挖孔屏 / 手势条避让：渐变背景延伸到系统栏后面，
+       内容收进安全区（值由 Capacitor SystemBars 注入） */
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
     grid-template-columns: 1fr;
     grid-template-rows: 44px 1fr 68px;
     grid-template-areas:
@@ -85,9 +99,15 @@
     right: 14%;
   }
 
+  /* 连接指示灯：避让手势条与底部圆角 */
   .status-dock {
-    right: 14px;
-    bottom: 84px;
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* 轻提示：落到标题栏下方（避开挖孔/状态栏） */
+  .toast-host {
+    top: calc(56px + env(safe-area-inset-top, 0px));
   }
 
   /* ── 消息页：会话列表与聊天面板单栏切换 ──────────────────────────── */
@@ -125,7 +145,7 @@
     margin-left: 0;
   }
 
-  /* ── 设置页：卡片占满、纵向滚动 ──────────────────────────────────── */
+  /* ── 设置页：卡片占满、可纵向滚动 ─────────────────────────────────── */
 
   .me-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -133,6 +153,7 @@
     min-height: 100%;
     align-content: start;
     padding: 4px 0 16px;
+    overflow-y: auto;
   }
 
   /* 关闭应用是桌面专属操作（直连环境 close 为空实现） */
@@ -140,7 +161,14 @@
     display: none;
   }
 
-  /* ── 登录页：卡片自适应宽度 ───────────────────────────────────────── */
+  /* ── 登录页：dvh 跟随键盘收缩，卡片自适应宽度 ─────────────────────── */
+
+  .auth-view {
+    height: 100vh;
+    height: 100dvh;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
 
   .auth-card {
     width: min(92vw, 372px);

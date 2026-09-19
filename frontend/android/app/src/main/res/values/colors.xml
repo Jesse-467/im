@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与渲染层 global.css 的品牌色/底色保持一致：
+         appBackground 用于 edge-to-edge 模式下系统栏区域的窗口底色，
+         与页面渐变起点 #eaf1f8 融为一体，视觉上无缝沉浸。 -->
+    <color name="colorPrimary">#0099ff</color>
+    <color name="colorPrimaryDark">#006fd6</color>
+    <color name="colorAccent">#0a7ffb</color>
+    <color name="appBackground">#eaf1f8</color>
+</resources>

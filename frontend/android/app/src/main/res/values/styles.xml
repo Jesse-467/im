@@ -9,10 +9,21 @@
         <item name="colorAccent">@color/colorAccent</item>
     </style>
 
+    <!-- BridgeActivity 实际使用的主题。
+         面向现代设备（Android 15+ / HyperOS 2，如红米 K80）：
+         - 系统强制 edge-to-edge，透明状态栏/手势条，内容沉浸延伸到系统栏后面；
+         - windowBackground 取页面渐变起点色，启动瞬间与 Web 底色一致无闪变；
+         - 窗口底色浅 → 状态栏/手势条图标用深色（light）保证可读。
+           运行时由 Capacitor SystemBars 插件接管，这里的值决定启动首帧。 -->
     <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
         <item name="android:background">@null</item>
+        <item name="android:windowBackground">@color/appBackground</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
     </style>
 
 

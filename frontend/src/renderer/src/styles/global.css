@@ -43,6 +43,8 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  /* 移动端：去除系统默认点按高亮，交由组件自身的按压反馈 */
+  -webkit-tap-highlight-color: transparent;
 }
 
 html,
@@ -52,6 +54,12 @@ body,
   overflow: hidden;
 }
 
+html {
+  /* 移动端 WebView：禁掉边缘过度滚动（边缘光晕/下拉），保持 App 观感 */
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   font-family: var(--font);
   font-size: 14px;
@@ -59,6 +67,8 @@ body {
   background: var(--bg-app);
   -webkit-font-smoothing: antialiased;
   user-select: none;
+  /* 移动端：禁双击缩放延迟，保留单指滚动与双指缩放 */
+  touch-action: manipulation;
 }
 
 /* 层级感底纹：两团品牌色晕染在浅底之上 */
@@ -120,6 +130,7 @@ img {
 /* 启动屏 */
 .boot-screen {
   height: 100vh;
+  height: 100dvh;
   display: grid;
   place-items: center;
 }
