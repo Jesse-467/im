@@ -122,6 +122,7 @@ func (r *conversationRepo) ListByUser(ctx context.Context, userID int64) ([]*biz
 				AliasName:      row.AliasName,
 				Role:           row.Role,
 				LastReadSeq:    row.LastReadSeq,
+				UnreadCount:    row.UnreadCount,
 				JoinedAt:       row.JoinedAt,
 			},
 		})
