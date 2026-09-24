@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { URL } from 'node:url'
 
@@ -20,23 +21,22 @@ const APP_NAME = '微语'
 /**
  * 多开实例分身。
  *
- * 主进程没有 requestSingleInstanceLock，本就允许多开；但多个实例共享
- * 同一 userData 目录 → localStorage 共享 → 登录态/设置互相覆盖，
- * 无法测试多账号或多设备场景。
+ * 主进程不申请 requestSingleInstanceLock，用户每次点击桌面图标都会启动
+ * 一个新的进程。每个进程默认自动生成 UUID 并使用独立的 userData 子目录，
+ * 从根上隔离 localStorage、Cookie、缓存、登录态与服务器设置，天然支持
+ * 多账号并行在线。
  *
- * 通过环境变量 IM_INSTANCE 或命令行参数 --im-instance=<N> 指定实例号，
- * 各实例使用独立的 userData 子目录，存储完全隔离：
- *   IM_INSTANCE=2 pnpm dev          （类 Unix shell）
- *   $env:IM_INSTANCE=2; pnpm dev    （PowerShell）
- *   微语.exe --im-instance=2        （打包后的 exe）
+ * 普通用户无需知道实例名；环境变量/命令行参数仅用于开发调试或恢复
+ * 某个已知实例目录：
+ *   IM_INSTANCE=2 pnpm dev
+ *   微语.exe --im-instance=2
  *
  * 必须在 app ready 之前调用（setPath 对 userData 生效窗口）。
  */
 function applyInstanceProfile(): void {
   const argvFlag = process.argv.find((a) => a.startsWith('--im-instance='))
-  const instance =
-    process.env.IM_INSTANCE?.trim() || argvFlag?.split('=')[1]?.trim() || ''
-  if (!instance || !/^[\w.-]+$/.test(instance)) return
+  const requested = process.env.IM_INSTANCE?.trim() || argvFlag?.split('=')[1]?.trim() || ''
+  const instance = /^[\w.-]+$/.test(requested) ? requested : randomUUID()
 
   const base = app.getPath('userData')
   const dir = join(base, `instance-${instance}`)
