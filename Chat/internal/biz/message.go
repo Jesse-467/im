@@ -384,10 +384,21 @@ func (uc *MessageUseCase) Pull(ctx context.Context, req *PullMessagesRequest) (*
 		"conversationId", req.ConversationID, "uid", req.UserID,
 		"fromSeq", req.FromSeq, "count", len(msgs), "maxSeq", conv.MaxSeq)
 
+	maxSeq := conv.MaxSeq
+	if req.Ascending && len(msgs) > 0 {
+		// 补齐分页的游标只能推进到本页实际返回的消息，不能直接跳到
+		// 会话尾部，否则客户端继续拉取时会跳过后续页面。
+		maxSeq = req.FromSeq
+		for _, msg := range msgs {
+			if msg.Seq > maxSeq {
+				maxSeq = msg.Seq
+			}
+		}
+	}
 	return &PullMessagesResult{
 		Messages: msgs,
-		// MaxSeq 让客户端拿到最新水位，便于判断自己是否落后
-		MaxSeq: conv.MaxSeq,
+		// 降序为会话最新水位；升序为本页补齐游标，空页可越过序号空洞。
+		MaxSeq: maxSeq,
 		// 取满 limit 即认为可能还有更多，客户端可据此继续拉取。
 		// 这里刻意不做 count(*) 之类的精确判断，避免多一次全表扫描。
 		HasMore: len(msgs) == limit,
