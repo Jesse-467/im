@@ -57,7 +57,7 @@ type resetPasswordReq struct {
 
 type modifyPersonalInfoReq struct {
 	NickName  string `json:"nickName"`
-	Gender    int32  `json:"gender"`
+	Gender    *int32 `json:"gender"`
 	AvatarUrl string `json:"avatarUrl"`
 }
 
@@ -260,17 +260,12 @@ func (s *AccountService) HTTPModifyPersonalInfo(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.ModifyUserInfo(c.Request.Context(), &accountv1.ModifyUserInfoRequest{
-		UserId:    uid,
-		Nickname:  req.NickName,
-		Gender:    accountv1.Gender(req.Gender),
-		AvatarUrl: req.AvatarUrl,
-	})
+	_, err := s.uc.ModifyUserInfo(c.Request.Context(), uid, req.NickName, req.Gender, req.AvatarUrl)
 	if err != nil {
-		httpx.Fail(c, err)
+		httpx.Fail(c, toErrs(err))
 		return
 	}
-	httpx.OK(c, modifyPersonalInfoResp{Success: resp.GetSuccess()})
+	httpx.OK(c, modifyPersonalInfoResp{Success: true})
 }
 
 // toProfileResp 把 protobuf 资料结构转换为 HTTP 响应 DTO。

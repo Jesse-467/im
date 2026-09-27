@@ -109,6 +109,11 @@ func (r *userRepo) Update(ctx context.Context, u *biz.User) error {
 	if err := r.data.db.WithContext(ctx).Save(m).Error; err != nil {
 		return fmt.Errorf("data: 更新用户失败: %w", err)
 	}
+	// Chat 在共享 Redis 中缓存用户简要资料。写入成功后清除对应缓存，
+	// 使好友、单聊和群成员列表下次读取时得到新昵称与头像。
+	if err := r.data.cache.Del(ctx, fmt.Sprintf("im:user:brief:%d", u.ID)).Err(); err != nil {
+		r.data.log.Warnw("msg", "清理用户资料缓存失败", "uid", u.ID, "err", err)
+	}
 	return nil
 }
 

@@ -187,8 +187,8 @@ func (uc *UserUseCase) BatchGetUsers(ctx context.Context, ids []int64) (map[int6
 
 // ModifyUserInfo 修改用户资料。
 //
-// 空字符串或零值表示该字段不修改，因此调用方无需先查询再回填。
-func (uc *UserUseCase) ModifyUserInfo(ctx context.Context, id int64, nickname string, gender int32, avatarURL string) (*User, error) {
+// 昵称和头像为空字符串时不修改；gender 为 nil 时不修改，显式传 0 可设为保密。
+func (uc *UserUseCase) ModifyUserInfo(ctx context.Context, id int64, nickname string, gender *int32, avatarURL string) (*User, error) {
 	u, err := uc.repo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -200,8 +200,11 @@ func (uc *UserUseCase) ModifyUserInfo(ctx context.Context, id int64, nickname st
 		}
 		u.Nickname = nickname
 	}
-	if gender == GenderMale || gender == GenderFemale {
-		u.Gender = gender
+	if gender != nil {
+		if *gender < GenderUnspecified || *gender > GenderFemale {
+			return nil, ErrInvalidParam
+		}
+		u.Gender = *gender
 	}
 	if avatarURL = strings.TrimSpace(avatarURL); avatarURL != "" {
 		u.AvatarURL = avatarURL

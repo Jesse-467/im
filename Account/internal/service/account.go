@@ -189,7 +189,12 @@ func (s *AccountService) BatchGetUsers(ctx context.Context, req *accountv1.Batch
 
 // ModifyUserInfo 修改用户资料。
 func (s *AccountService) ModifyUserInfo(ctx context.Context, req *accountv1.ModifyUserInfoRequest) (*accountv1.ModifyUserInfoResponse, error) {
-	_, err := s.uc.ModifyUserInfo(ctx, req.GetUserId(), req.GetNickname(), int32(req.GetGender()), req.GetAvatarUrl())
+	var gender *int32
+	if req.GetGender() != accountv1.Gender_GENDER_UNSPECIFIED {
+		value := int32(req.GetGender())
+		gender = &value
+	}
+	_, err := s.uc.ModifyUserInfo(ctx, req.GetUserId(), req.GetNickname(), gender, req.GetAvatarUrl())
 	if err != nil {
 		return nil, toErrs(err)
 	}
