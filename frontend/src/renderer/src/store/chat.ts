@@ -18,48 +18,14 @@ import {
 import { ApiError, CODE_TOKEN_REVOKED, CODE_UNAUTHORIZED } from '@/api/client'
 import { getToken } from '@/core/session'
 import { wsClient, type WsStatus } from '@/core/ws'
+import { mergeMessages, receivedCursor, type LocalMsg } from '@/core/message-state'
 import type { Conversation, Friend, FriendRequest, GroupMember, WsMessagePayload } from '@/api/types'
 import { useAuthStore } from './auth'
 import { toast } from './toast'
 
-/** 本地消息：服务端消息 + 发送中间态（pending/failed/recalled） */
-export interface LocalMsg {
-  id: string // pending 时为空字符串
-  seq: number
-  senderId: string
-  type: number
-  content: string
-  uuid: string
-  createTime: number
-  pending: boolean
-  failed: boolean
-  recalled: boolean
-}
+export type { LocalMsg } from '@/core/message-state'
 
 const MSG_PAGE_SIZE = 50
-
-function toLocalMsg(m: {
-  id: string
-  seq: number
-  senderId: string
-  type: number
-  content: string
-  uuid: string
-  createTime: number
-}): LocalMsg {
-  return {
-    id: m.id,
-    seq: m.seq,
-    senderId: m.senderId,
-    type: m.type,
-    content: m.content,
-    uuid: m.uuid || `id-${m.id}`,
-    createTime: m.createTime,
-    pending: false,
-    failed: false,
-    recalled: false
-  }
-}
 
 function sortConversations(list: Conversation[]): Conversation[] {
   return [...list].sort((a, b) => {
@@ -79,7 +45,7 @@ function settleMessage(
   const list = state.messagesByConv[conversationId]
   if (!list) return {}
   // 下行广播也携带发送方的 clientMsgId。只有本地确实存在该消息时，
-  // 才能把它当回执推进水位；否则会跳过接收方尚未拉取的正文。
+  // 才能把它当发送回执。即使确认发送成功，也不能跳过尚未补齐的其他正文。
   if (!list.some((m) => m.uuid === uuid)) return {}
   return {
     messagesByConv: {
@@ -87,10 +53,6 @@ function settleMessage(
       [conversationId]: list.map((m) =>
         m.uuid === uuid ? { ...m, ...patch, pending: false } : m
       )
-    },
-    maxSeqByConv: {
-      ...state.maxSeqByConv,
-      [conversationId]: Math.max(state.maxSeqByConv[conversationId] ?? 0, patch.seq)
     }
   }
 }
@@ -103,6 +65,7 @@ interface ChatState {
   messagesByConv: Record<string, LocalMsg[]>
   maxSeqByConv: Record<string, number>
   membersByConv: Record<string, GroupMember[]>
+  historyByConv: Record<string, { hasMore: boolean; loading: boolean; error: string }>
 
   friends: Friend[]
   friendRequests: FriendRequest[]
@@ -120,6 +83,7 @@ interface ChatState {
   openConversation: (conversationId: string) => Promise<void>
   closeConversation: () => void
   syncActive: () => Promise<void>
+  loadOlder: (conversationId: string) => Promise<void>
   sendText: (conversationId: string, text: string) => Promise<void>
   recall: (conversationId: string, messageId: string) => Promise<void>
 
@@ -136,6 +100,7 @@ interface ChatState {
 
 let peerResolving = false
 let chatBindingsReady = false
+const syncingConversations = new Set<string>()
 
 export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
@@ -144,6 +109,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messagesByConv: {},
   maxSeqByConv: {},
   membersByConv: {},
+  historyByConv: {},
   friends: [],
   friendRequests: [],
   peerByConv: {},
@@ -235,12 +201,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (!get().messagesByConv[conversationId]) {
+      const token = getToken()
+      set((s) => ({ historyByConv: { ...s.historyByConv, [conversationId]: { hasMore: false, loading: true, error: '' } } }))
       try {
         const res = await apiPullMessages(conversationId, MSG_PAGE_SIZE)
-        // pull 默认降序（历史翻页），渲染需要升序
-        const list = [...(res.list ?? [])].reverse()
+        if (getToken() !== token) return
+        const list = res.list ?? []
         set((s) => ({
-          messagesByConv: { ...s.messagesByConv, [conversationId]: list.map(toLocalMsg) },
+          messagesByConv: { ...s.messagesByConv, [conversationId]: mergeMessages(s.messagesByConv[conversationId] ?? [], list) },
+          historyByConv: { ...s.historyByConv, [conversationId]: { hasMore: res.hasMore, loading: false, error: '' } },
           maxSeqByConv: {
             ...s.maxSeqByConv,
             [conversationId]: Math.max(res.maxSeq ?? 0, ...list.map((m) => m.seq), 0)
@@ -248,6 +217,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }))
         markReadIfActive(conversationId)
       } catch (err) {
+        if (getToken() !== token) return
+        set((s) => ({ historyByConv: { ...s.historyByConv, [conversationId]: { hasMore: false, loading: false, error: '消息加载失败，请重试' } } }))
         handleAuthError(err)
       }
     } else {
@@ -263,31 +234,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
   /** 增量补齐当前打开会话的新消息 */
   syncActive: async () => {
     const convId = get().activeConvId
-    if (!convId) return
+    if (!convId || !get().messagesByConv[convId] || syncingConversations.has(convId)) return
     const conv = get().conversations.find((c) => c.conversationId === convId)
     const localMax = get().maxSeqByConv[convId] ?? 0
     if ((conv?.maxSeq ?? 0) <= localMax) return
 
+    const token = getToken()
+    syncingConversations.add(convId)
     try {
-      const res = await apiSyncMessages(convId, localMax, MSG_PAGE_SIZE)
-      const incoming = res.list ?? []
-      set((s) => {
-        const existing = s.messagesByConv[convId] ?? []
-        if (incoming.length > 0) {
-          const seen = new Set(existing.map((m) => m.uuid || `id-${m.id}`))
-          const fresh = incoming.filter((m) => !seen.has(m.uuid || `id-${m.id}`)).map(toLocalMsg)
-          const merged = [...existing, ...fresh].sort((a, b) => a.seq - b.seq)
-          return {
-            messagesByConv: { ...s.messagesByConv, [convId]: merged },
-            maxSeqByConv: { ...s.maxSeqByConv, [convId]: Math.max(localMax, res.maxSeq ?? 0) }
-          }
-        }
-        return {
-          maxSeqByConv: { ...s.maxSeqByConv, [convId]: Math.max(localMax, res.maxSeq ?? 0) }
-        }
-      })
+      let cursor = localMax
+      do {
+        const res = await apiSyncMessages(convId, cursor, MSG_PAGE_SIZE)
+        if (getToken() !== token || get().activeConvId !== convId) return
+        const incoming = res.list ?? []
+        // 兼容旧服务的 maxSeq：有消息时只推进到真正拿到的正文，不能跳页。
+        const next = incoming.length ? receivedCursor(cursor, incoming) : Math.max(cursor, res.maxSeq ?? 0)
+        set((s) => ({
+          messagesByConv: { ...s.messagesByConv, [convId]: mergeMessages(s.messagesByConv[convId] ?? [], incoming) },
+          maxSeqByConv: { ...s.maxSeqByConv, [convId]: Math.max(s.maxSeqByConv[convId] ?? 0, next) }
+        }))
+        if (!res.hasMore || next <= cursor) break
+        cursor = next
+      } while (get().activeConvId === convId)
       markReadIfActive(convId)
     } catch (err) {
+      handleAuthError(err)
+    } finally {
+      syncingConversations.delete(convId)
+    }
+  },
+
+  loadOlder: async (conversationId) => {
+    const history = get().historyByConv[conversationId]
+    if (!history?.hasMore || history.loading) return
+    const seqs = (get().messagesByConv[conversationId] ?? []).filter((m) => m.seq > 0).map((m) => m.seq)
+    const oldest = Math.min(...seqs)
+    if (oldest <= 1 || !Number.isFinite(oldest)) {
+      set((s) => ({ historyByConv: { ...s.historyByConv, [conversationId]: { ...history, hasMore: false } } }))
+      return
+    }
+    const token = getToken()
+    set((s) => ({ historyByConv: { ...s.historyByConv, [conversationId]: { ...history, loading: true, error: '' } } }))
+    try {
+      const res = await apiPullMessages(conversationId, MSG_PAGE_SIZE, oldest - 1)
+      if (getToken() !== token) return
+      set((s) => ({
+        messagesByConv: { ...s.messagesByConv, [conversationId]: mergeMessages(s.messagesByConv[conversationId] ?? [], res.list ?? []) },
+        historyByConv: { ...s.historyByConv, [conversationId]: { hasMore: res.hasMore, loading: false, error: '' } }
+      }))
+    } catch (err) {
+      if (getToken() !== token) return
+      set((s) => ({ historyByConv: { ...s.historyByConv, [conversationId]: { ...history, loading: false, error: '历史消息加载失败，点击重试' } } }))
       handleAuthError(err)
     }
   },
@@ -416,6 +413,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messagesByConv: {},
       maxSeqByConv: {},
       membersByConv: {},
+      historyByConv: {},
       friends: [],
       friendRequests: [],
       peerByConv: {},

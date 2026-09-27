@@ -38,8 +38,8 @@ export function apiSendMessage(
   })
 }
 
-export function apiPullMessages(conversationId: string, limit: number): Promise<PullResult> {
-  return post('chat', '/api/message/pull', { conversationId, limit })
+export function apiPullMessages(conversationId: string, limit: number, toSeq?: number): Promise<PullResult> {
+  return post('chat', '/api/message/pull', { conversationId, limit, toSeq })
 }
 
 export function apiSyncMessages(

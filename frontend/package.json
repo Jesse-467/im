@@ -12,6 +12,7 @@
     "typecheck:node": "tsc --noEmit --composite false -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit --composite false -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test:messages": "tsc src/renderer/src/core/message-state.ts --target ES2022 --module commonjs --rootDir src/renderer/src --outDir out/tests --skipLibCheck && node --test tests/messages.test.cjs",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",

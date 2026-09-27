@@ -9,7 +9,7 @@
   z-index: 1;
   display: grid;
   grid-template-columns: 84px 1fr;
-  grid-template-rows: 40px 1fr;
+  grid-template-rows: 40px minmax(0, 1fr);
   grid-template-areas:
     'titlebar titlebar'
     'rail body';
@@ -205,11 +205,13 @@
 .shell-body {
   grid-area: body;
   min-width: 0;
+  min-height: 0;
   padding: 0 12px 12px 0;
 }
 
 .shell-view {
   height: 100%;
+  min-height: 0;
 }
 
 /* ── 右下角连接状态 ───────────────────────────────────────────────────── */

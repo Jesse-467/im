@@ -55,3 +55,4 @@ go.work.sum
 *.md
 !/README.md
 !/REFACTOR_PLAN.md
+!/frontend/ACCEPTANCE.md

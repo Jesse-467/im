@@ -40,7 +40,7 @@
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
     grid-template-columns: 1fr;
-    grid-template-rows: 44px 1fr 68px;
+    grid-template-rows: 44px minmax(0, 1fr) 68px;
     grid-template-areas:
       'titlebar'
       'body'

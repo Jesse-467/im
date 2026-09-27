@@ -3,6 +3,8 @@ import { motion } from 'framer-motion'
 import { useChatStore } from '@/store/chat'
 import { useAuthStore } from '@/store/auth'
 import { ApiError } from '@/api/client'
+import { apiQueryUserInfo } from '@/api/account'
+import type { Profile } from '@/api/types'
 import { toast } from '@/store/toast'
 import { Avatar } from '@/components/Avatar'
 import { EmptyState } from '@/components/EmptyState'
@@ -210,9 +212,22 @@ function RequestCard({
   const meId = useAuthStore((s) => s.userId)
   const handleRequest = useChatStore((s) => s.handleRequest)
   const [busy, setBusy] = useState(false)
+  const friends = useChatStore((s) => s.friends)
+  const [peerProfile, setPeerProfile] = useState<Profile | null>(null)
 
   const incoming = req.fromUid !== meId
   const peerId = incoming ? req.fromUid : req.toUid
+  const friend = friends.find((f) => f.userId === peerId)
+  const peerName = friend?.remark || friend?.nickName || peerProfile?.nickName || `用户 ${peerId}`
+  const avatarUrl = friend?.avatarUrl || peerProfile?.avatarUrl
+  useEffect(() => {
+    let cancelled = false
+    setPeerProfile(null)
+    void apiQueryUserInfo(peerId).then((profile) => {
+      if (!cancelled) setPeerProfile(profile)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [peerId])
   const statusText =
     req.status === 1 ? '已同意' : req.status === 2 ? '已拒绝' : req.status === 3 ? '已过期' : ''
 
@@ -235,12 +250,13 @@ function RequestCard({
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: Math.min(index * 0.03, 0.3), duration: 0.22 }}
     >
-      <Avatar name={`用户 ${peerId}`} seed={String(peerId)} size={42} />
+      <Avatar name={peerName} url={avatarUrl} seed={String(peerId)} size={42} />
       <div className="request-main">
         <div className="request-title">
-          {incoming ? `用户 ${peerId}` : `我 → 用户 ${peerId}`}
-          <span className="request-dir">{incoming ? '请求添加你为好友' : '等待对方处理'}</span>
+          <span className="request-peer" title={peerName}>{incoming ? peerName : `我 → ${peerName}`}</span>
+          <span className="request-dir">{req.status === 0 ? (incoming ? '请求添加你为好友' : '等待对方处理') : (incoming ? '收到的申请' : '发出的申请')}</span>
         </div>
+        <div className="request-time">ID: {peerId}</div>
         <div className="request-msg">{req.applyMsg || '我是…'}</div>
         <div className="request-time">{formatListTime(req.createdAt)}</div>
       </div>

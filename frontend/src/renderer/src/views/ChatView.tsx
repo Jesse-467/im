@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useChatStore, type LocalMsg } from '@/store/chat'
 import { useAuthStore } from '@/store/auth'
@@ -7,6 +7,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { ChatIcon, SearchIcon, SendIcon, GroupIcon, ClockIcon, AlertIcon } from '@/components/icons'
 import { formatDayLabel, formatListTime, formatMsgTime } from '@/core/format'
 import type { Conversation } from '@/api/types'
+import { GroupMembersModal } from './GroupMembersModal'
 
 /**
  * 消息页：左侧会话卡片流 + 右侧聊天面板。
@@ -54,17 +55,17 @@ export function ChatView({ onGoContacts }: { onGoContacts: () => void }): JSX.El
           {convLoaded && filtered.length === 0 ? (
             <EmptyState
               icon={<ChatIcon width={34} height={34} />}
-              title="还没有会话"
-              hint="添加好友或创建群聊，开始你的第一次对话"
+              title={keyword.trim() ? '没有匹配的会话' : '还没有会话'}
+              hint={keyword.trim() ? '试试其他名字，或清空搜索' : '添加好友或创建群聊，开始你的第一次对话'}
             >
-              <motion.button
+              {!keyword.trim() && <motion.button
                 className="primary-btn small"
                 whileHover={{ y: -1 }}
                 whileTap={{ scale: 0.96 }}
                 onClick={onGoContacts}
               >
                 去添加好友
-              </motion.button>
+              </motion.button>}
             </EmptyState>
           ) : (
             <AnimatePresence initial={false}>
@@ -191,14 +192,35 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
   const sendText = useChatStore((s) => s.sendText)
   const recall = useChatStore((s) => s.recall)
   const wsStatus = useChatStore((s) => s.wsStatus)
+  const history = useChatStore((s) => s.historyByConv[conv.conversationId])
+  const loadOlder = useChatStore((s) => s.loadOlder)
+  const openConversation = useChatStore((s) => s.openConversation)
   const profile = useAuthStore((s) => s.profile)
   const meId = useAuthStore((s) => s.userId)
 
   const [draft, setDraft] = useState('')
+  const [membersOpen, setMembersOpen] = useState(false)
   const [menu, setMenu] = useState<{ x: number; y: number; msg: LocalMsg } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickBottom = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const historyAnchor = useRef<{ height: number; top: number } | null>(null)
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    const anchor = historyAnchor.current
+    if (!el || !anchor || history?.loading) return
+    el.scrollTop = anchor.top + el.scrollHeight - anchor.height
+    historyAnchor.current = null
+  }, [messages, history?.loading])
+
+  const loadHistory = (): void => {
+    const el = scrollRef.current
+    if (!el || history?.loading) return
+    historyAnchor.current = { height: el.scrollHeight, top: el.scrollTop }
+    stickBottom.current = false
+    void loadOlder(conv.conversationId)
+  }
 
   // 新消息时保持在底部附近则吸底
   useEffect(() => {
@@ -256,15 +278,26 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
             <div className="chat-header-sub">{subtitle}</div>
           </div>
         </div>
-        {conv.type === 2 && <span className="chat-header-badge">GROUP</span>}
+        {conv.type === 2 && <button className="chat-header-members" onClick={() => setMembersOpen(true)} title="查看群成员">
+          <GroupIcon width={15} height={15} />群成员
+        </button>}
       </header>
 
       <div className="msg-scroll" ref={scrollRef} onScroll={onScroll}>
+        {history && (
+          <div className="history-control" aria-live="polite">
+            {history.loading ? '正在加载消息…' : history.error ? (
+              <button onClick={messages.length ? loadHistory : () => void openConversation(conv.conversationId)}>{history.error}</button>
+            ) : history.hasMore ? (
+              <button onClick={loadHistory}>加载更早的消息</button>
+            ) : messages.length > 0 ? '已到最早的消息' : null}
+          </div>
+        )}
         {messages.length === 0 ? (
           <EmptyState
             icon={<ChatIcon width={30} height={30} />}
-            title="还没有消息"
-            hint="说点什么，开启这段对话"
+            title={history?.loading ? '正在加载消息' : history?.error ? '消息暂时未加载' : '还没有消息'}
+            hint={history?.loading || history?.error ? '' : '说点什么，开启这段对话'}
           />
         ) : (
           messages.map((msg, idx) => {
@@ -353,6 +386,7 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
           </>
         )}
       </AnimatePresence>
+      {conv.type === 2 && <GroupMembersModal open={membersOpen} conversation={conv} onClose={() => setMembersOpen(false)} />}
     </div>
   )
 }

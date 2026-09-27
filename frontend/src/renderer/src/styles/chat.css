@@ -203,23 +203,75 @@
   color: var(--text-3);
 }
 
-.chat-header-badge {
+.chat-header-members {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex: none;
-  padding: 3px 10px;
+  padding: 7px 12px;
   border-radius: 999px;
   background: var(--brand-soft);
   color: var(--brand-deep);
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 1.5px;
+  transition: background 0.15s;
 }
+
+.chat-header-members:hover {
+  background: var(--hover);
+}
+
+.group-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+
+.group-summary-count, .group-member-id {
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.group-summary-count { flex: none; }
+.group-members-list { max-height: 360px; overflow-y: auto; margin-top: 8px; }
+.group-member-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
+.group-member-main { flex: 1; min-width: 0; }
+.group-member-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.group-member-name span { color: var(--text-3); font-size: 12px; }
+.group-member-role { flex: none; border-radius: 6px; padding: 3px 7px; background: var(--hover); color: var(--text-3); font-size: 11px; }
+.group-member-role.role-2, .group-member-role.role-1 { background: var(--brand-soft); color: var(--brand-deep); }
+.group-members-error { margin-top: 12px; color: var(--danger); font-size: 12px; }
+.group-members-error button { text-decoration: underline; }
 
 /* ── 消息流 ───────────────────────────────────────────────────────────── */
 
 .msg-scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 14px 6px 10px;
+}
+
+.history-control {
+  min-height: 28px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12px;
+  padding: 4px 12px 10px;
+}
+
+.history-control button {
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 14px;
+  background: var(--brand-soft);
+  color: var(--brand-deep);
+  cursor: pointer;
 }
 
 .msg-day {
