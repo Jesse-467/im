@@ -1,5 +1,4 @@
 import { useEffect } from 'react'
-import { AnimatePresence } from 'framer-motion'
 import { useAuthStore } from '@/store/auth'
 import { AuthView } from '@/views/AuthView'
 import { Shell } from '@/views/Shell'
@@ -7,7 +6,7 @@ import { ToastHost } from '@/components/Toast'
 
 /**
  * 应用根节点：登录态二选一切换（AuthView / Shell），
- * 切换通过 AnimatePresence 产生「卡片退场 → 主框架入场」的过渡。
+ * 登录态切换立即替换视图，入场动画由各视图负责，避免嵌套退场阻塞页面。
  */
 export default function App(): JSX.Element {
   const status = useAuthStore((s) => s.status)
@@ -19,17 +18,15 @@ export default function App(): JSX.Element {
 
   return (
     <>
-      <AnimatePresence mode="wait">
-        {status === 'authed' ? (
-          <Shell key="shell" />
-        ) : status === 'guest' ? (
-          <AuthView key="auth" />
-        ) : (
-          <div key="boot" className="boot-screen">
-            <span className="boot-pulse" />
-          </div>
-        )}
-      </AnimatePresence>
+      {status === 'authed' ? (
+        <Shell key="shell" />
+      ) : status === 'guest' ? (
+        <AuthView key="auth" />
+      ) : (
+        <div key="boot" className="boot-screen">
+          <span className="boot-pulse" />
+        </div>
+      )}
       <ToastHost />
     </>
   )

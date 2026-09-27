@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { useChatStore } from '@/store/chat'
 import { useAuthStore } from '@/store/auth'
 import { ApiError } from '@/api/client'
@@ -127,64 +127,62 @@ export function ContactsView({ onNav }: { onNav: (key: NavKey) => void }): JSX.E
         )}
 
         <div className="contacts-scroll">
-          <AnimatePresence mode="wait">
-            {tab === 'friends' ? (
-              <motion.div
-                key="friends"
-                initial={{ opacity: 0, x: -18 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -18 }}
-                transition={{ duration: 0.18 }}
-              >
-                {filtered.length === 0 ? (
-                  <EmptyState
-                    icon={<ContactsIcon width={34} height={34} />}
-                    title={keyword ? '没有匹配的好友' : '还没有好友'}
-                    hint={keyword ? '' : '通过右上角按钮添加好友'}
-                  />
-                ) : (
-                  filtered.map((f, i) => (
-                    <motion.button
-                      key={f.userId}
-                      className="contact-card"
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ delay: Math.min(i * 0.02, 0.3), duration: 0.22 }}
-                      whileHover={{ x: 2 }}
-                      whileTap={{ scale: 0.99 }}
-                      onClick={() => openChatWith(f.userId)}
-                    >
-                      <Avatar name={f.remark || f.nickName} url={f.avatarUrl} seed={String(f.userId)} size={42} />
-                      <span className="contact-main">
-                        <span className="contact-name">{f.remark || f.nickName}</span>
-                        <span className="contact-sub">ID: {f.userId}</span>
-                      </span>
-                      <motion.span className="contact-chat-hint" whileHover={{ scale: 1.08 }}>
-                        <ChatIcon width={15} height={15} />
-                      </motion.span>
-                    </motion.button>
-                  ))
-                )}
-              </motion.div>
-            ) : (
-              <motion.div
-                key="requests"
-                initial={{ opacity: 0, x: 18 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 18 }}
-                transition={{ duration: 0.18 }}
-              >
-                {requests.length === 0 ? (
-                  <EmptyState icon={<BellIcon width={32} height={32} />} title="暂无好友申请" />
-                ) : (
-                  requests.map((r, i) => (
-                    <RequestCard key={r.id} req={r} index={i} />
-                  ))
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
+          {tab === 'friends' ? (
+            <motion.div
+              key="friends"
+              initial={{ opacity: 0, x: -18 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -18 }}
+              transition={{ duration: 0.18 }}
+            >
+              {filtered.length === 0 ? (
+                <EmptyState
+                  icon={<ContactsIcon width={34} height={34} />}
+                  title={keyword ? '没有匹配的好友' : '还没有好友'}
+                  hint={keyword ? '' : '通过右上角按钮添加好友'}
+                />
+              ) : (
+                filtered.map((f, i) => (
+                  <motion.button
+                    key={f.userId}
+                    className="contact-card"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ delay: Math.min(i * 0.02, 0.3), duration: 0.22 }}
+                    whileHover={{ x: 2 }}
+                    whileTap={{ scale: 0.99 }}
+                    onClick={() => openChatWith(f.userId)}
+                  >
+                    <Avatar name={f.remark || f.nickName} url={f.avatarUrl} seed={String(f.userId)} size={42} />
+                    <span className="contact-main">
+                      <span className="contact-name">{f.remark || f.nickName}</span>
+                      <span className="contact-sub">ID: {f.userId}</span>
+                    </span>
+                    <motion.span className="contact-chat-hint" whileHover={{ scale: 1.08 }}>
+                      <ChatIcon width={15} height={15} />
+                    </motion.span>
+                  </motion.button>
+                ))
+              )}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="requests"
+              initial={{ opacity: 0, x: 18 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 18 }}
+              transition={{ duration: 0.18 }}
+            >
+              {requests.length === 0 ? (
+                <EmptyState icon={<BellIcon width={32} height={32} />} title="暂无好友申请" />
+              ) : (
+                requests.map((r, i) => (
+                  <RequestCard key={r.id} req={r} index={i} />
+                ))
+              )}
+            </motion.div>
+          )}
         </div>
       </section>
 

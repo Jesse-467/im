@@ -55,8 +55,9 @@ export function Shell(): JSX.Element {
   useEffect(() => {
     let tick = 0
     const timer = setInterval(() => {
-      void refresh()
-      void syncActive()
+      // 增量同步依赖刚刷新的会话 maxSeq；并行调用会读到旧水位，
+      // 导致会话列表出现新消息，而已打开的聊天内容和未读状态不更新。
+      void refresh().then(syncActive)
       if (++tick % 3 === 0) void refreshSlow()
     }, 5000)
     return () => clearInterval(timer)
@@ -156,26 +157,24 @@ export function Shell(): JSX.Element {
       </motion.aside>
 
       <main className="shell-body">
-        <AnimatePresence mode="wait" custom={direction}>
-          <motion.div
-            key={nav}
-            className="shell-view"
-            custom={direction}
-            initial="enter"
-            animate="center"
-            exit="exit"
-            variants={{
-              enter: (dir: number) => ({ opacity: 0, x: 44 * dir, scale: 0.995 }),
-              center: { opacity: 1, x: 0, scale: 1 },
-              exit: (dir: number) => ({ opacity: 0, x: -44 * dir, scale: 0.995 })
-            }}
-            transition={{ duration: 0.24, ease: [0.32, 0.72, 0, 1] }}
-          >
-            {nav === 'chat' && <ChatView onGoContacts={() => switchNav('contacts')} />}
-            {nav === 'contacts' && <ContactsView onNav={switchNav} />}
-            {nav === 'me' && <MeView />}
-          </motion.div>
-        </AnimatePresence>
+        <motion.div
+          key={nav}
+          className="shell-view"
+          custom={direction}
+          initial="enter"
+          animate="center"
+          exit="exit"
+          variants={{
+            enter: (dir: number) => ({ opacity: 0, x: 44 * dir, scale: 0.995 }),
+            center: { opacity: 1, x: 0, scale: 1 },
+            exit: (dir: number) => ({ opacity: 0, x: -44 * dir, scale: 0.995 })
+          }}
+          transition={{ duration: 0.24, ease: [0.32, 0.72, 0, 1] }}
+        >
+          {nav === 'chat' && <ChatView onGoContacts={() => switchNav('contacts')} />}
+          {nav === 'contacts' && <ContactsView onNav={switchNav} />}
+          {nav === 'me' && <MeView />}
+        </motion.div>
       </main>
 
       <div className="status-dock" title={wsStatus === 'open' ? '已连接' : '连接中…'}>

@@ -78,6 +78,9 @@ function settleMessage(
 ): Partial<ChatState> {
   const list = state.messagesByConv[conversationId]
   if (!list) return {}
+  // 下行广播也携带发送方的 clientMsgId。只有本地确实存在该消息时，
+  // 才能把它当回执推进水位；否则会跳过接收方尚未拉取的正文。
+  if (!list.some((m) => m.uuid === uuid)) return {}
   return {
     messagesByConv: {
       ...state.messagesByConv,
@@ -157,7 +160,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         void get().handleWsPayload(payload)
       })
       wsClient.onKicked((reason) => {
-        useAuthStore.getState().logout()
+        const auth = useAuthStore.getState()
+        if (auth.status !== 'authed') return
+        auth.invalidateSession()
         useChatStore.getState().reset()
         toast(reason || '登录状态已失效，请重新登录', 'error')
       })
@@ -203,14 +208,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   refreshSlow: async () => {
     await Promise.all([get().loadFriends(), get().loadRequests()]).catch(() => undefined)
+    const convId = get().activeConvId
+    if (convId && get().conversations.some((c) => c.conversationId === convId && c.type === 2)) {
+      try {
+        const res = await apiGroupMemberList(convId)
+        set((s) => ({ membersByConv: { ...s.membersByConv, [convId]: res.list ?? [] } }))
+      } catch (err) {
+        handleAuthError(err)
+      }
+    }
   },
 
   openConversation: async (conversationId) => {
     set({ activeConvId: conversationId })
     const conv = get().conversations.find((c) => c.conversationId === conversationId)
 
-    // 群聊：拉一次成员列表用于昵称展示
-    if (conv?.type === 2 && !get().membersByConv[conversationId]) {
+    // 重新进入群聊时刷新成员资料，避免沿用旧昵称、头像或已退群成员。
+    if (conv?.type === 2) {
       apiGroupMemberList(conversationId)
         .then((res) => {
           set((s) => ({
@@ -497,7 +511,9 @@ async function resolvePeers(): Promise<void> {
 
 function handleAuthError(err: unknown): void {
   if (err instanceof ApiError && (err.code === CODE_UNAUTHORIZED || err.code === CODE_TOKEN_REVOKED)) {
-    useAuthStore.getState().logout()
+    const auth = useAuthStore.getState()
+    if (auth.status !== 'authed') return
+    auth.invalidateSession()
     useChatStore.getState().reset()
     toast('登录已过期，请重新登录', 'error')
   }

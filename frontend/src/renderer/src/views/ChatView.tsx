@@ -81,35 +81,33 @@ export function ChatView({ onGoContacts }: { onGoContacts: () => void }): JSX.El
         </div>
       </motion.section>
 
-      <AnimatePresence mode="wait">
-        {activeConv ? (
-          <motion.section
-            key={activeConv.conversationId}
-            className="panel chat-panel"
-            initial={{ opacity: 0, x: 22, scale: 0.995 }}
-            animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: -14, scale: 0.997 }}
-            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-          >
-            <ChatPanel conv={activeConv} onBack={closeConversation} />
-          </motion.section>
-        ) : (
-          <motion.section
-            key="empty-chat"
-            className="panel chat-panel chat-panel-empty"
-            initial={{ opacity: 0, scale: 0.995 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-          >
-            <EmptyState
-              icon={<ChatIcon width={40} height={40} />}
-              title="选择一个会话"
-              hint="从左侧挑选一段对话，或开启新的相遇"
-            />
-          </motion.section>
-        )}
-      </AnimatePresence>
+      {activeConv ? (
+        <motion.section
+          key={activeConv.conversationId}
+          className="panel chat-panel"
+          initial={{ opacity: 0, x: 22, scale: 0.995 }}
+          animate={{ opacity: 1, x: 0, scale: 1 }}
+          exit={{ opacity: 0, x: -14, scale: 0.997 }}
+          transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+        >
+          <ChatPanel conv={activeConv} onBack={closeConversation} />
+        </motion.section>
+      ) : (
+        <motion.section
+          key="empty-chat"
+          className="panel chat-panel chat-panel-empty"
+          initial={{ opacity: 0, scale: 0.995 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+        >
+          <EmptyState
+            icon={<ChatIcon width={40} height={40} />}
+            title="选择一个会话"
+            hint="从左侧挑选一段对话，或开启新的相遇"
+          />
+        </motion.section>
+      )}
     </div>
   )
 }
@@ -227,8 +225,9 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
 
   const memberName = (senderId: string): string => {
     if (senderId === meId) return profile?.nickName ?? '我'
+    if (conv.type === 1) return name
     const m = members?.find((x) => x.userId === senderId)
-    return m?.nickName || m?.aliasName || `用户 ${senderId}`
+    return m?.aliasName || m?.nickName || `用户 ${senderId}`
   }
 
   const subtitle =
@@ -287,7 +286,9 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
                   avatarUrl={
                     msg.senderId === meId
                       ? profile?.avatarUrl
-                      : members?.find((x) => x.userId === msg.senderId)?.avatarUrl
+                      : conv.type === 1
+                        ? conv.avatarUrl
+                        : members?.find((x) => x.userId === msg.senderId)?.avatarUrl
                   }
                   recallable={msg.senderId === meId && !msg.pending && !msg.failed && msg.id !== ''}
                   onContextMenu={(x, y) => setMenu({ x, y, msg })}

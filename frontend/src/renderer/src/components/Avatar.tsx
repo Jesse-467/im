@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { avatarGradient, initialOf } from '@/core/format'
 
 interface AvatarProps {
@@ -21,6 +22,7 @@ export function Avatar({
   online = false,
   square = true
 }: AvatarProps): JSX.Element {
+  const [failedUrl, setFailedUrl] = useState('')
   const style: React.CSSProperties = {
     width: size,
     height: size,
@@ -30,8 +32,15 @@ export function Avatar({
 
   return (
     <span className="avatar-wrap" style={{ width: size, height: size }}>
-      {url ? (
-        <img className="avatar-img" src={url} alt={name} style={style} draggable={false} />
+      {url && url !== failedUrl ? (
+        <img
+          className="avatar-img"
+          src={url}
+          alt={name}
+          style={style}
+          draggable={false}
+          onError={() => setFailedUrl(url)}
+        />
       ) : (
         <span className="avatar-fallback" style={{ ...style, fontSize: size * 0.42 }}>
           {initialOf(name)}

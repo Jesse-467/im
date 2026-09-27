@@ -29,6 +29,7 @@ interface AuthState {
     gender: number
   }) => Promise<void>
   logout: () => void
+  invalidateSession: () => void
   loadProfile: () => Promise<void>
   updateProfile: (input: { nickName: string; gender: number; avatarUrl: string }) => Promise<void>
 }
@@ -50,7 +51,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       await get().loadProfile()
     } catch (err) {
       if (err instanceof ApiError && (err.code === CODE_UNAUTHORIZED || err.code === CODE_TOKEN_REVOKED)) {
-        get().logout()
+        get().invalidateSession()
       }
     }
   },
@@ -71,6 +72,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: () => {
     if (getToken()) void apiLogout(getDeviceId()).catch(() => undefined)
+    get().invalidateSession()
+  },
+
+  invalidateSession: () => {
     wsClient.close()
     setToken('')
     set({ status: 'guest', token: '', userId: '', profile: null })
