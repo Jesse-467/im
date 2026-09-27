@@ -1,6 +1,6 @@
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { mergeMessages, receivedCursor, toLocalMsg } = require('../out/tests/core/message-state.js')
+const { confirmMessage, failMessage, mergeMessages, prepareRetry, receivedCursor, toLocalMsg } = require('../out/tests/core/message-state.js')
 
 const msg = (seq, overrides = {}) => ({
   id: String(90071992547409910n + BigInt(seq)), conversationId: '1', groupId: '1',
@@ -47,4 +47,29 @@ test('幂等重发将乐观项确认，不重复展示，雪花 ID 原样保留'
   assert.equal(merged.length, 1)
   assert.equal(merged[0].id, '90071992547409911')
   assert.equal(merged[0].pending, false)
+})
+
+test('失败保留正文、原时间和幂等键，原气泡重试并确认', () => {
+  const optimistic = { ...toLocalMsg(msg(0, { id: '', uuid: 'retry-key', createTime: 12345 })), pending: true }
+  const failed = failMessage([optimistic], 'retry-key')
+  assert.equal(failed[0].failed, true)
+  assert.equal(failed[0].createTime, 12345)
+  const retrying = prepareRetry(failed, 'retry-key')
+  assert.equal(retrying[0].pending, true)
+  assert.equal(retrying[0].failed, false)
+  assert.equal(retrying[0].uuid, optimistic.uuid)
+  assert.equal(retrying[0].content, optimistic.content)
+  assert.deepEqual(prepareRetry(retrying, 'retry-key'), retrying)
+  const confirmed = confirmMessage(retrying, 'retry-key', { id: '11', seq: 1, createTime: 12346 })
+  assert.equal(confirmed.length, 1)
+  assert.equal(confirmed[0].id, '11')
+  assert.equal(confirmed[0].pending, false)
+  assert.equal(confirmed[0].failed, false)
+})
+
+test('迟到的 HTTP 错误不会覆盖 WS 成功回执', () => {
+  const optimistic = { ...toLocalMsg(msg(0, { id: '', uuid: 'ack-race' })), pending: true }
+  const confirmed = confirmMessage([optimistic], 'ack-race', { id: '12', seq: 2, createTime: 12346 })
+  assert.deepEqual(failMessage(confirmed, 'ack-race'), confirmed)
+  assert.deepEqual(prepareRetry(confirmed, 'ack-race'), confirmed)
 })

@@ -38,3 +38,22 @@ export function mergeMessages(existing: LocalMsg[], incoming: ChatMsg[]): LocalM
 export function receivedCursor(fromSeq: number, incoming: ChatMsg[]): number {
   return incoming.reduce((cursor, m) => Math.max(cursor, m.seq), fromSeq)
 }
+
+export function confirmMessage(existing: LocalMsg[], uuid: string, receipt: {
+  id: string; seq: number; createTime: number
+}): LocalMsg[] {
+  return existing.map((m) => m.uuid === uuid ? { ...m, ...receipt, pending: false, failed: false } : m)
+}
+
+/** 请求失败可能晚于 WS 成功回执到达，不得把已确认的消息重新标为失败。 */
+export function failMessage(existing: LocalMsg[], uuid: string): LocalMsg[] {
+  return existing.map((m) => m.uuid === uuid && m.pending && m.id === ''
+    ? { ...m, pending: false, failed: true }
+    : m)
+}
+
+export function prepareRetry(existing: LocalMsg[], uuid: string): LocalMsg[] {
+  return existing.map((m) => m.uuid === uuid && m.failed && !m.pending && m.id === ''
+    ? { ...m, pending: true, failed: false }
+    : m)
+}

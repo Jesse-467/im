@@ -18,7 +18,7 @@ import {
 import { ApiError, CODE_TOKEN_REVOKED, CODE_UNAUTHORIZED } from '@/api/client'
 import { getToken } from '@/core/session'
 import { wsClient, type WsStatus } from '@/core/ws'
-import { mergeMessages, receivedCursor, type LocalMsg } from '@/core/message-state'
+import { confirmMessage, failMessage, mergeMessages, prepareRetry, receivedCursor, type LocalMsg } from '@/core/message-state'
 import type { Conversation, Friend, FriendRequest, GroupMember, WsMessagePayload } from '@/api/types'
 import { useAuthStore } from './auth'
 import { toast } from './toast'
@@ -40,7 +40,7 @@ function settleMessage(
   state: ChatState,
   conversationId: string,
   uuid: string,
-  patch: { id: string; seq: number; createTime: number; failed?: boolean }
+  patch: { id: string; seq: number; createTime: number }
 ): Partial<ChatState> {
   const list = state.messagesByConv[conversationId]
   if (!list) return {}
@@ -50,9 +50,7 @@ function settleMessage(
   return {
     messagesByConv: {
       ...state.messagesByConv,
-      [conversationId]: list.map((m) =>
-        m.uuid === uuid ? { ...m, ...patch, pending: false } : m
-      )
+      [conversationId]: confirmMessage(list, uuid, patch)
     }
   }
 }
@@ -85,6 +83,7 @@ interface ChatState {
   syncActive: () => Promise<void>
   loadOlder: (conversationId: string) => Promise<void>
   sendText: (conversationId: string, text: string) => Promise<void>
+  retryText: (conversationId: string, uuid: string) => Promise<void>
   recall: (conversationId: string, messageId: string) => Promise<void>
 
   loadFriends: () => Promise<void>
@@ -334,6 +333,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await confirmSend(conversationId, uuid)
   },
 
+  retryText: async (conversationId, uuid) => {
+    const list = get().messagesByConv[conversationId] ?? []
+    if (!list.some((m) => m.uuid === uuid && m.failed && !m.pending && m.id === '')) return
+    set((s) => ({ messagesByConv: {
+      ...s.messagesByConv,
+      [conversationId]: prepareRetry(s.messagesByConv[conversationId] ?? [], uuid)
+    } }))
+    // 原 uuid 即服务端幂等键；不追加新气泡，重复点击也不会产生并发重试。
+    await confirmSend(conversationId, uuid)
+  },
+
   recall: async (conversationId, messageId) => {
     try {
       await apiRecallMessage(conversationId, messageId)
@@ -429,9 +439,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 async function confirmSend(conversationId: string, uuid: string): Promise<void> {
   const st = useChatStore.getState()
   const pending = st.messagesByConv[conversationId]?.find((m) => m.uuid === uuid)
-  if (!pending) return
+  if (!pending?.pending) return
+  const token = getToken()
   try {
     const res = await apiSendMessage(conversationId, pending.content, uuid)
+    if (getToken() !== token) return
     useChatStore.setState((s) =>
       settleMessage(s, conversationId, uuid, {
         id: res.id,
@@ -441,10 +453,15 @@ async function confirmSend(conversationId: string, uuid: string): Promise<void> 
     )
     void st.refresh()
   } catch (err) {
+    if (getToken() !== token) return
+    const unconfirmed = useChatStore.getState().messagesByConv[conversationId]
+      ?.some((m) => m.uuid === uuid && m.pending && m.id === '')
+    if (!unconfirmed) return
+    useChatStore.setState((s) => ({ messagesByConv: {
+      ...s.messagesByConv,
+      [conversationId]: failMessage(s.messagesByConv[conversationId] ?? [], uuid)
+    } }))
     handleAuthError(err)
-    useChatStore.setState((s) =>
-      settleMessage(s, conversationId, uuid, { id: '', seq: 0, createTime: 0, failed: true })
-    )
     toast(err instanceof ApiError ? err.message : '发送失败', 'error')
   }
 }

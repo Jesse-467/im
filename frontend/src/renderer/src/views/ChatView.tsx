@@ -190,6 +190,7 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
   const messages = useChatStore((s) => s.messagesByConv[conv.conversationId]) ?? []
   const members = useChatStore((s) => s.membersByConv[conv.conversationId])
   const sendText = useChatStore((s) => s.sendText)
+  const retryText = useChatStore((s) => s.retryText)
   const recall = useChatStore((s) => s.recall)
   const wsStatus = useChatStore((s) => s.wsStatus)
   const history = useChatStore((s) => s.historyByConv[conv.conversationId])
@@ -324,6 +325,7 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
                         : members?.find((x) => x.userId === msg.senderId)?.avatarUrl
                   }
                   recallable={msg.senderId === meId && !msg.pending && !msg.failed && msg.id !== ''}
+                  onRetry={() => void retryText(conv.conversationId, msg.uuid)}
                   onContextMenu={(x, y) => setMenu({ x, y, msg })}
                 />
               </div>
@@ -399,6 +401,7 @@ function MessageRow({
   senderName,
   avatarUrl,
   recallable,
+  onRetry,
   onContextMenu
 }: {
   msg: LocalMsg
@@ -407,6 +410,7 @@ function MessageRow({
   senderName: string
   avatarUrl?: string
   recallable: boolean
+  onRetry: () => void
   onContextMenu: (x: number, y: number) => void
 }): JSX.Element {
   const [hover, setHover] = useState(false)
@@ -448,7 +452,10 @@ function MessageRow({
             </span>
           )}
         </div>
-        <div className="msg-meta">{formatMsgTime(msg.createTime)}</div>
+        <div className="msg-meta">
+          {formatMsgTime(msg.createTime)}
+          {mine && msg.failed && <button className="msg-retry" onClick={onRetry} aria-label="重试发送这条消息">发送失败 · 重试</button>}
+        </div>
       </div>
       {hover && recallable && <span className="msg-recall-hint">右键撤回</span>}
     </motion.div>

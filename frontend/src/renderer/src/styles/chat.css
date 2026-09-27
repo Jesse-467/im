@@ -404,6 +404,17 @@
   color: var(--text-3);
 }
 
+.msg-retry {
+  margin-left: 8px;
+  color: var(--danger);
+  font-size: 11px;
+  padding: 3px 5px;
+  border-radius: 5px;
+}
+
+.msg-retry:hover { background: rgba(245, 63, 63, 0.08); }
+.msg-retry:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
 .msg-recall-hint {
   position: absolute;
   top: 50%;
