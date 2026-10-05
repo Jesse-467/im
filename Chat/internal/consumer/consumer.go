@@ -205,15 +205,17 @@ func (c *Consumer) buildPushMessage(msg *biz.Message) ws.Message {
 	return ws.Message{
 		Type: ws.TypeMessage,
 		Data: pushPayload{
-			ConversationID: ws.ID(msg.ConversationID),
-			MessageID:      ws.ID(msg.ID),
-			Seq:            msg.Seq,
-			SenderID:       ws.ID(msg.SenderID),
-			Type:           msg.Type,
-			Content:        msg.Content,
-			Extra:          msg.Extra,
-			ClientMsgID:    msg.ClientMsgID,
-			CreateTime:     msg.CreatedAt.UnixMilli(),
+			ConversationID:  ws.ID(msg.ConversationID),
+			MessageID:       ws.ID(msg.ID),
+			Seq:             msg.Seq,
+			SenderID:        ws.ID(msg.SenderID),
+			Type:            msg.Type,
+			Content:         msg.VisibleContent(),
+			Extra:           visibleExtra(msg),
+			ClientMsgID:     msg.ClientMsgID,
+			CreateTime:      msg.CreatedAt.UnixMilli(),
+			Status:          msg.Status,
+			RecallMessageID: ws.ID(msg.RecallTargetID()),
 		},
 	}
 }
@@ -226,15 +228,24 @@ func (c *Consumer) buildPushMessage(msg *biz.Message) ws.Message {
 // 这里用 ID 类型（见 ws.ID）保证与 HTTP 接口的表示完全一致，
 // 避免同一个 ID 在两条链路上形态不同而让客户端要做两套处理。
 type pushPayload struct {
-	ConversationID ws.ID  `json:"conversationId"`
-	MessageID      ws.ID  `json:"messageId"`
-	Seq            int64  `json:"seq"`
-	SenderID       ws.ID  `json:"senderId"`
-	Type           int32  `json:"type"`
-	Content        string `json:"content"`
-	Extra          string `json:"extra,omitempty"`
-	ClientMsgID    string `json:"clientMsgId"`
-	CreateTime     int64  `json:"createTime"`
+	ConversationID  ws.ID  `json:"conversationId"`
+	MessageID       ws.ID  `json:"messageId"`
+	Seq             int64  `json:"seq"`
+	SenderID        ws.ID  `json:"senderId"`
+	Type            int32  `json:"type"`
+	Content         string `json:"content"`
+	Extra           string `json:"extra,omitempty"`
+	ClientMsgID     string `json:"clientMsgId"`
+	CreateTime      int64  `json:"createTime"`
+	Status          int32  `json:"status"`
+	RecallMessageID ws.ID  `json:"recallMessageId,omitempty"`
+}
+
+func visibleExtra(msg *biz.Message) string {
+	if msg.Status == biz.MessageStatusRecalled {
+		return ""
+	}
+	return msg.Extra
 }
 
 // 编译期断言：Consumer 可直接作为订阅回调使用。

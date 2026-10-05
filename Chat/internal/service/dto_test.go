@@ -2,12 +2,32 @@ package service
 
 import (
 	"encoding/json"
+	"github.com/Jesse-467/im/Chat/internal/biz"
 	"testing"
 )
 
 // 雪花 ID 会超出 JavaScript 的 Number.MAX_SAFE_INTEGER（9007199254740991）。
 // 下面统一用这个真实量级的样本，确保测试覆盖到"会丢精度"的区间。
 const snowflakeSample = int64(359572627845451776)
+
+func TestRecalledDTOHidesBodyAndPreservesTargetID(t *testing.T) {
+	original := toChatMsgDTO(&biz.Message{ID: snowflakeSample, Type: biz.MessageTypeText, Status: biz.MessageStatusRecalled, Content: "private original"})
+	if original.Content != "" || original.Status != biz.MessageStatusRecalled {
+		t.Fatalf("recalled body leaked: %+v", original)
+	}
+	notice := toChatMsgDTO(&biz.Message{Type: biz.MessageTypeRecall, Extra: `{"recallMessageId":"359572627845451776"}`})
+	if notice.RecallMessageID != ID(snowflakeSample) {
+		t.Fatalf("target changed: %+v", notice)
+	}
+	encoded, _ := json.Marshal(notice)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["recallMessageId"]) != `"359572627845451776"` {
+		t.Fatalf("target must be string: %s", encoded)
+	}
+}
 
 // TestIDMarshalsAsString 验证对外输出的 ID 是 JSON 字符串。
 //

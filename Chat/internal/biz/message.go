@@ -2,6 +2,7 @@ package biz
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -16,6 +17,8 @@ const (
 	MessageTypeVideo  int32 = 3
 	MessageTypeAudio  int32 = 4
 	MessageTypeSystem int32 = 5
+	// 服务端生成的撤回事件也占用 seq，以便离线客户端按原补齐协议收到变更。
+	MessageTypeRecall int32 = 6
 )
 
 // 消息状态
@@ -62,6 +65,29 @@ type Message struct {
 	RecalledAt time.Time
 	RecalledBy int64
 	CreatedAt  time.Time
+}
+
+// VisibleContent 隐藏撤回正文；存储中的原文只用于内部追溯，不再下发客户端。
+func (m *Message) VisibleContent() string {
+	if m.Status == MessageStatusRecalled {
+		return ""
+	}
+	return m.Content
+}
+
+// RecallTargetID 只解释服务端专用的撤回事件，普通消息的 extra 不具有撤回权限。
+func (m *Message) RecallTargetID() int64 {
+	if m.Type != MessageTypeRecall {
+		return 0
+	}
+	var extra struct {
+		MessageID string `json:"recallMessageId"`
+	}
+	if json.Unmarshal([]byte(m.Extra), &extra) != nil {
+		return 0
+	}
+	id, _ := strconv.ParseInt(extra.MessageID, 10, 64)
+	return id
 }
 
 // SeqAllocator 分配会话内序号。
@@ -139,6 +165,7 @@ type MessageRepo interface {
 
 	// FindByConversationAndClientMsgID 用于幂等命中时回查已存在的消息
 	FindByConversationAndClientMsgID(ctx context.Context, conversationID, senderID int64, clientMsgID string) (*Message, error)
+	FindByID(ctx context.Context, conversationID, messageID int64) (*Message, error)
 
 	// FindLastByConversations 批量取每个会话的最后一条消息。
 	// 必须一次性查询，避免会话列表出现 N+1。
@@ -150,11 +177,11 @@ type MessageRepo interface {
 	// ascending 决定返回顺序：离线补偿要升序，历史翻页要降序。
 	ListBySeqRange(ctx context.Context, conversationID, fromSeq, toSeq int64, limit int, ascending bool) ([]*Message, error)
 
-	// Recall 撤回消息，并把 recalled_at/recalled_by 一并写入。
+	// Recall 原子修改原消息、写入有新 seq 的撤回事件及其 Outbox。
 	//
 	// 实现必须用条件更新（status = 正常）保证只有一次撤回能生效，
 	// 同时限定 sender_id 防止撤回他人消息。
-	Recall(ctx context.Context, conversationID, messageID, operatorID int64) (bool, error)
+	Recall(ctx context.Context, conversationID, messageID, operatorID int64, notice *Message, event *OutboxEvent) (bool, error)
 
 	// FindBySeq 按会话与序号反查单条消息，供「按 seq 撤回」定位 messageID。
 	//
@@ -427,7 +454,43 @@ func (uc *MessageUseCase) Recall(ctx context.Context, conversationID, messageID,
 		return ErrNotConversationMember
 	}
 
-	ok, err := uc.repo.Recall(ctx, conversationID, messageID, operatorID)
+	original, err := uc.repo.FindByID(ctx, conversationID, messageID)
+	if err != nil {
+		return err
+	}
+	if original == nil || original.SenderID != operatorID || original.Type == MessageTypeRecall {
+		return ErrMessageNotRecallable
+	}
+	if original.Status == MessageStatusRecalled {
+		return nil
+	}
+	if original.Status != MessageStatusNormal {
+		return ErrMessageNotRecallable
+	}
+	msgID, err := uc.idGen.Next()
+	if err != nil {
+		return err
+	}
+	seq, err := uc.seq.Next(ctx, conversationID)
+	if err != nil {
+		return err
+	}
+	senderSeq, err := uc.seq.NextSenderSeq(ctx, conversationID, operatorID)
+	if err != nil {
+		return err
+	}
+	notice := &Message{
+		ID: msgID, ConversationID: conversationID, Seq: seq, SenderSeq: senderSeq,
+		SenderID: operatorID, Type: MessageTypeRecall, Content: "撤回了一条消息",
+		Extra:       fmt.Sprintf(`{"recallMessageId":"%d"}`, messageID),
+		ClientMsgID: "srv-recall-" + strconv.FormatInt(msgID, 36),
+		Status:      MessageStatusNormal, CreatedAt: time.Now(),
+	}
+	event, err := uc.buildOutboxEvent(notice)
+	if err != nil {
+		return err
+	}
+	ok, err := uc.repo.Recall(ctx, conversationID, messageID, operatorID, notice, event)
 	if err != nil {
 		uc.log.Errorw("msg", "撤回消息失败",
 			"conversationId", conversationID, "messageId", messageID,
@@ -435,6 +498,10 @@ func (uc *MessageUseCase) Recall(ctx context.Context, conversationID, messageID,
 		return err
 	}
 	if !ok {
+		// 同时撤回的另一请求可能已完成同一事务；重复请求不追加第二条事件。
+		if current, err := uc.repo.FindByID(ctx, conversationID, messageID); err == nil && current != nil && current.SenderID == operatorID && current.Status == MessageStatusRecalled {
+			return nil
+		}
 		// 条件更新影响 0 行：要么消息不存在，要么不是本人发送，要么已被撤回。
 		// Warn 级别：能区分「客户端传错 ID」与「越权撤回他人消息」，
 		// 后者突增时值得关注。

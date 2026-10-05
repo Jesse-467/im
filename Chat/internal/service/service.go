@@ -81,6 +81,8 @@ func bizErrCode(err error) uint32 {
 	switch {
 	case errors.Is(err, biz.ErrInvalidParam):
 		return errs.CodeParamError
+	case errors.Is(err, biz.ErrConversationTypeInvalid):
+		return errs.CodeParamError
 
 	case errors.Is(err, biz.ErrNoPermission),
 		errors.Is(err, biz.ErrNotGroupOwner),
@@ -91,6 +93,7 @@ func bizErrCode(err error) uint32 {
 		return errs.CodeForbidden
 
 	case errors.Is(err, biz.ErrConversationNotFound),
+		errors.Is(err, biz.ErrUserNotFound),
 		errors.Is(err, biz.ErrFriendRequestNotFound),
 		errors.Is(err, biz.ErrGroupNotFound),
 		errors.Is(err, biz.ErrMessageNotFound):

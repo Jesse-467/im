@@ -29,40 +29,57 @@ func NewMessageRepo(d *Data) biz.MessageRepo { return &messageRepo{data: d} }
 // 而服务端却认为一切正常——这是最难发现的一类消息丢失。
 func (r *messageRepo) Create(ctx context.Context, msg *biz.Message, event *biz.OutboxEvent) error {
 	return r.data.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(fromBizMessage(msg)).Error; err != nil {
-			// 唯一约束冲突交由上层按幂等语义处理，这里不吞掉错误
-			return fmt.Errorf("data: 写入消息失败: %w", err)
-		}
-
-		// 会话序号高水位用 CAS 推进：只在更大时更新，保证并发下不回退。
-		// 同时刷新 updated_at，让会话列表能按「最近活跃」排序。
-		if err := tx.Model(&conversationModel{}).
-			Where("id = ? AND max_seq < ?", msg.ConversationID, msg.Seq).
-			Updates(map[string]any{
-				"max_seq":    msg.Seq,
-				"updated_at": time.Now(),
-			}).Error; err != nil {
-			return fmt.Errorf("data: 推进会话序号失败: %w", err)
-		}
-
-		// 未读数按成员累加：发送者自己的未读不增加，其余成员 +1。
-		// 放在同一事务里，避免出现「有新消息但红点没亮」。
-		if err := tx.Model(&conversationMemberModel{}).
-			Where("conversation_id = ? AND user_id <> ? AND left_at IS NULL", msg.ConversationID, msg.SenderID).
-			Update("unread_count", gorm.Expr("unread_count + 1")).Error; err != nil {
-			return fmt.Errorf("data: 更新未读数失败: %w", err)
-		}
-
-		// 事件写入同一个事务：这是 Outbox 模式的关键一步
-		return tx.Create(&messageOutboxModel{
-			EventID:      event.EventID,
-			Topic:        event.Topic,
-			PartitionKey: event.PartitionKey,
-			Payload:      event.Payload,
-			Status:       outboxStatusPending,
-			NextRetryAt:  time.Now(),
-		}).Error
+		return createMessage(tx, msg, event)
 	})
+}
+
+// 发送与撤回共用写入链路，调用方负责事务边界。
+func createMessage(tx *gorm.DB, msg *biz.Message, event *biz.OutboxEvent) error {
+	if err := tx.Create(fromBizMessage(msg)).Error; err != nil {
+		// 唯一约束冲突交由上层按幂等语义处理，这里不吞掉错误
+		return fmt.Errorf("data: 写入消息失败: %w", err)
+	}
+
+	// 会话序号高水位用 CAS 推进：只在更大时更新，保证并发下不回退。
+	// 同时刷新 updated_at，让会话列表能按「最近活跃」排序。
+	if err := tx.Model(&conversationModel{}).
+		Where("id = ? AND max_seq < ?", msg.ConversationID, msg.Seq).
+		Updates(map[string]any{
+			"max_seq":    msg.Seq,
+			"updated_at": time.Now(),
+		}).Error; err != nil {
+		return fmt.Errorf("data: 推进会话序号失败: %w", err)
+	}
+
+	// 未读数按成员累加：发送者自己的未读不增加，其余成员 +1。
+	// 放在同一事务里，避免出现「有新消息但红点没亮」。
+	if err := tx.Model(&conversationMemberModel{}).
+		Where("conversation_id = ? AND user_id <> ? AND left_at IS NULL", msg.ConversationID, msg.SenderID).
+		Update("unread_count", gorm.Expr("unread_count + 1")).Error; err != nil {
+		return fmt.Errorf("data: 更新未读数失败: %w", err)
+	}
+
+	// 事件写入同一个事务：这是 Outbox 模式的关键一步
+	return tx.Create(&messageOutboxModel{
+		EventID:      event.EventID,
+		Topic:        event.Topic,
+		PartitionKey: event.PartitionKey,
+		Payload:      event.Payload,
+		Status:       outboxStatusPending,
+		NextRetryAt:  time.Now(),
+	}).Error
+}
+
+func (r *messageRepo) FindByID(ctx context.Context, conversationID, messageID int64) (*biz.Message, error) {
+	var m messageModel
+	err := r.data.conn(ctx).Where("conversation_id = ? AND id = ?", conversationID, messageID).First(&m).Error
+	if isRecordNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("data: 按 ID 查询消息失败: %w", err)
+	}
+	return toBizMessage(&m), nil
 }
 
 // FindByConversationAndClientMsgID 按幂等键回查消息。
@@ -145,20 +162,31 @@ func (r *messageRepo) ListBySeqRange(ctx context.Context, conversationID, fromSe
 //
 // 条件更新一次性表达三个约束：属于该会话、由本人发送、当前处于正常状态。
 // 把判断放进 WHERE 而不是先查再改，是因为后者在并发下会让两次撤回都成功。
-func (r *messageRepo) Recall(ctx context.Context, conversationID, messageID, operatorID int64) (bool, error) {
-	res := r.data.conn(ctx).
-		Model(&messageModel{}).
-		Where("id = ? AND conversation_id = ? AND sender_id = ? AND status = ?",
-			messageID, conversationID, operatorID, biz.MessageStatusNormal).
-		Updates(map[string]any{
-			"status":      biz.MessageStatusRecalled,
-			"recalled_at": time.Now(),
-			"recalled_by": operatorID,
-		})
-	if res.Error != nil {
-		return false, fmt.Errorf("data: 撤回消息失败: %w", res.Error)
-	}
-	return res.RowsAffected == 1, nil
+func (r *messageRepo) Recall(ctx context.Context, conversationID, messageID, operatorID int64, notice *biz.Message, event *biz.OutboxEvent) (bool, error) {
+	changed := false
+	err := r.data.conn(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.
+			Model(&messageModel{}).
+			Where("id = ? AND conversation_id = ? AND sender_id = ? AND status = ? AND type <> ?",
+				messageID, conversationID, operatorID, biz.MessageStatusNormal, biz.MessageTypeRecall).
+			Updates(map[string]any{
+				"status":      biz.MessageStatusRecalled,
+				"recalled_at": notice.CreatedAt,
+				"recalled_by": operatorID,
+			})
+		if res.Error != nil {
+			return fmt.Errorf("data: 撤回消息失败: %w", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		if err := createMessage(tx, notice, event); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	return changed && err == nil, err
 }
 
 // FindBySeq 按会话与序号装载单条消息。

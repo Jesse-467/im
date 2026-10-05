@@ -23,6 +23,23 @@ type UserProvider interface {
 	BatchGetBriefs(ctx context.Context, userIDs []int64) (map[int64]*UserBrief, error)
 }
 
+// 建立好友或群成员关系前，必须确认账号存在；展示用的 ID 回退不能用于写入关系。
+func ensureUsersExist(ctx context.Context, users UserProvider, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	briefs, err := users.BatchGetBriefs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if briefs[id] == nil {
+			return ErrUserNotFound
+		}
+	}
+	return nil
+}
+
 // TokenVerifier 向账号中心确认令牌是否仍然有效。
 //
 // 为什么聊天的鉴权必须回到账号中心：

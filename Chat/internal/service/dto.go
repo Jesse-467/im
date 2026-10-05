@@ -134,15 +134,17 @@ func groupIDOf(conversationID int64) string {
 // 避免前端 JSON.parse 的精度丢失。Seq 不是雪花值（会话内递增的小整数），
 // 保持数字类型，便于客户端直接做算术比较。
 type chatMsgDTO struct {
-	ID             ID     `json:"id"`
-	ConversationID ID     `json:"conversationId"`
-	GroupID        string `json:"groupId"`
-	Seq            int64  `json:"seq"`
-	SenderID       ID     `json:"senderId"`
-	Type           int64  `json:"type"`
-	Content        string `json:"content"`
-	Uuid           string `json:"uuid"`
-	CreateTime     int64  `json:"createTime"`
+	ID              ID     `json:"id"`
+	ConversationID  ID     `json:"conversationId"`
+	GroupID         string `json:"groupId"`
+	Seq             int64  `json:"seq"`
+	SenderID        ID     `json:"senderId"`
+	Type            int64  `json:"type"`
+	Content         string `json:"content"`
+	Uuid            string `json:"uuid"`
+	CreateTime      int64  `json:"createTime"`
+	Status          int32  `json:"status"`
+	RecallMessageID ID     `json:"recallMessageId,omitempty"`
 }
 
 // toChatMsgDTO 把消息实体转换为对外结构。
@@ -151,15 +153,17 @@ func toChatMsgDTO(m *biz.Message) *chatMsgDTO {
 		return nil
 	}
 	return &chatMsgDTO{
-		ID:             ID(m.ID),
-		ConversationID: ID(m.ConversationID),
-		GroupID:        groupIDOf(m.ConversationID),
-		Seq:            m.Seq,
-		SenderID:       ID(m.SenderID),
-		Type:           int64(m.Type),
-		Content:        m.Content,
-		Uuid:           m.ClientMsgID,
-		CreateTime:     m.CreatedAt.UnixMilli(),
+		ID:              ID(m.ID),
+		ConversationID:  ID(m.ConversationID),
+		GroupID:         groupIDOf(m.ConversationID),
+		Seq:             m.Seq,
+		SenderID:        ID(m.SenderID),
+		Type:            int64(m.Type),
+		Content:         m.VisibleContent(),
+		Uuid:            m.ClientMsgID,
+		CreateTime:      m.CreatedAt.UnixMilli(),
+		Status:          m.Status,
+		RecallMessageID: ID(m.RecallTargetID()),
 	}
 }
 

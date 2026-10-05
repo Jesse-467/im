@@ -18,6 +18,7 @@ var (
 	ErrConversationNotFound    = errors.New("会话不存在")
 	ErrNotConversationMember   = errors.New("不是会话成员")
 	ErrConversationTypeInvalid = errors.New("会话类型不合法")
+	ErrUserNotFound            = errors.New("用户不存在，请检查用户 ID")
 
 	// 好友
 	ErrFriendRequestNotFound = errors.New("好友申请不存在")

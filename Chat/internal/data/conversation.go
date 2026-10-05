@@ -163,48 +163,86 @@ func (r *conversationRepo) FindPeerIDs(ctx context.Context, conversationIDs []in
 	return peers, nil
 }
 
-// AddMembers 批量加入成员，已存在的成员自动跳过。
+// FindMemberAliases 一次查询列表摘要所需的发送者昵称；已退群的历史发送者仍可展示昵称。
+func (r *conversationRepo) FindMemberAliases(ctx context.Context, senders map[int64]int64) (map[int64]string, error) {
+	aliases := make(map[int64]string, len(senders))
+	if len(senders) == 0 {
+		return aliases, nil
+	}
+	pairs := make([][]any, 0, len(senders))
+	for convID, userID := range senders {
+		pairs = append(pairs, []any{convID, userID})
+	}
+	var rows []conversationMemberModel
+	if err := r.data.conn(ctx).Select("conversation_id, alias_name").
+		Where("(conversation_id, user_id) IN ?", pairs).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("data: 批量查询群消息发送者昵称失败: %w", err)
+	}
+	for _, row := range rows {
+		aliases[row.ConversationID] = row.AliasName
+	}
+	return aliases, nil
+}
+
+// AddMembers 批量加入成员，已在群的成员自动跳过，离开的成员可重新入群。
 //
-// 用 ON CONFLICT DO NOTHING 让幂等性由数据库唯一约束（conversation_id, user_id）保证：
-// 先查后插在并发下仍会撞唯一约束并报错，而 DO NOTHING 无需重试即可安全重复调用，
-// 同时 RowsAffected 精确反映本次真实新增的人数。
+// 会话行锁保护去重、容量校验与人数更新；重入重置已读位点、未读数与角色。
 func (r *conversationRepo) AddMembers(ctx context.Context, conversationID int64, members []*biz.ConversationMember) (int, error) {
 	if len(members) == 0 {
 		return 0, nil
 	}
 
-	rows := make([]*conversationMemberModel, 0, len(members))
-	for _, member := range members {
-		row := fromBizMember(member)
-		row.ConversationID = conversationID
-		rows = append(rows, row)
-	}
-
-	res := r.data.db.WithContext(ctx).
-		Clauses(clause.OnConflict{
-			// 重新入群时复用原有成员行：把 left_at 清空表示「又在场了」。
-			// 若只做 DoNothing，退过群的人再次入群会因唯一约束而加不进来，
-			// 表现为「拉人成功但对方看不到群」这类难查的问题。
-			Columns:   []clause.Column{{Name: "conversation_id"}, {Name: "user_id"}},
-			DoUpdates: clause.Assignments(map[string]any{"left_at": nil}),
-		}).
-		Create(&rows)
-	if res.Error != nil {
-		return 0, fmt.Errorf("data: 批量加入会话成员失败: %w", res.Error)
-	}
-	// 新增成员后同步推进会话上的冗余计数。
-	//
-	// 用表达式自增而非「先读再写」：并发拉人时后者会丢更新。
-	// 计数只增不减（成员是软删除，行仍在），因此这里不做减法。
-	if res.RowsAffected > 0 {
-		if err := r.data.db.WithContext(ctx).
-			Model(&conversationModel{}).
-			Where("id = ?", conversationID).
-			Update("member_count", gorm.Expr("member_count + ?", res.RowsAffected)).Error; err != nil {
-			return 0, fmt.Errorf("data: 更新会话成员数失败: %w", err)
+	added := 0
+	err := r.data.conn(ctx).Transaction(func(tx *gorm.DB) error {
+		// 和退群共用会话行锁，人数、上限与实际成员写入保持一致。
+		var conv conversationModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&conv, conversationID).Error; err != nil {
+			return err
 		}
+		var current []int64
+		if err := tx.Model(&conversationMemberModel{}).Where("conversation_id = ? AND left_at IS NULL", conversationID).Pluck("user_id", &current).Error; err != nil {
+			return err
+		}
+		seen := make(map[int64]bool, len(current)+len(members))
+		for _, id := range current {
+			seen[id] = true
+		}
+		rows := make([]*conversationMemberModel, 0, len(members))
+		for _, member := range members {
+			if seen[member.UserID] {
+				continue
+			}
+			seen[member.UserID] = true
+			row := fromBizMember(member)
+			row.ConversationID = conversationID
+			row.JoinedAt = time.Now()
+			row.LastReadSeq = conv.MaxSeq
+			rows = append(rows, row)
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		if len(current)+len(rows) > biz.GroupMaxMembers {
+			return biz.ErrGroupMemberLimitExceeded
+		}
+		res := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "conversation_id"}, {Name: "user_id"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"left_at": nil, "joined_at": time.Now(), "unread_count": 0, "last_read_seq": conv.MaxSeq,
+				"role": biz.MemberRoleMember,
+			}),
+		}).Create(&rows)
+		if res.Error != nil {
+			return res.Error
+		}
+		added = int(res.RowsAffected)
+		return tx.Model(&conversationModel{}).Where("id = ?", conversationID).
+			Update("member_count", len(current)+added).Error
+	})
+	if err != nil {
+		return 0, err
 	}
-	return int(res.RowsAffected), nil
+	return added, nil
 }
 
 // RemoveMember 把成员移出会话。
@@ -216,10 +254,22 @@ func (r *conversationRepo) AddMembers(ctx context.Context, conversationID int64,
 //
 // 重复调用天然幂等：条件里限定 left_at IS NULL，已离开的行不会被再次更新。
 func (r *conversationRepo) RemoveMember(ctx context.Context, conversationID, userID int64) error {
-	err := r.data.db.WithContext(ctx).
-		Model(&conversationMemberModel{}).
-		Where("conversation_id = ? AND user_id = ? AND left_at IS NULL", conversationID, userID).
-		Updates(map[string]any{"left_at": time.Now(), "unread_count": 0}).Error
+	err := r.data.conn(ctx).Transaction(func(tx *gorm.DB) error {
+		var conv conversationModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&conv, conversationID).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&conversationMemberModel{}).
+			Where("conversation_id = ? AND user_id = ? AND left_at IS NULL", conversationID, userID).
+			Updates(map[string]any{"left_at": time.Now(), "unread_count": 0}).Error; err != nil {
+			return err
+		}
+		var count int64
+		if err := tx.Model(&conversationMemberModel{}).Where("conversation_id = ? AND left_at IS NULL", conversationID).Count(&count).Error; err != nil {
+			return err
+		}
+		return tx.Model(&conversationModel{}).Where("id = ?", conversationID).Update("member_count", count).Error
+	})
 	if err != nil {
 		return fmt.Errorf("data: 移除会话成员失败: %w", err)
 	}
@@ -337,4 +387,26 @@ func (r *conversationRepo) Update(ctx context.Context, conv *biz.Conversation) e
 		return fmt.Errorf("data: 更新会话失败: %w", err)
 	}
 	return nil
+}
+
+func (r *conversationRepo) UpdateGroupInfo(ctx context.Context, conversationID, userID int64, patch *biz.GroupInfoPatch) error {
+	return r.data.conn(ctx).Transaction(func(tx *gorm.DB) error {
+		changes := map[string]any{}
+		if patch.Name != nil {
+			changes["name"] = *patch.Name
+		}
+		if patch.AvatarURL != nil {
+			changes["avatar_url"] = *patch.AvatarURL
+		}
+		if len(changes) > 0 {
+			if err := tx.Model(&conversationModel{}).Where("id = ?", conversationID).Updates(changes).Error; err != nil {
+				return err
+			}
+		}
+		if patch.AliasName != nil {
+			return tx.Model(&conversationMemberModel{}).Where("conversation_id = ? AND user_id = ? AND left_at IS NULL", conversationID, userID).
+				Update("alias_name", *patch.AliasName).Error
+		}
+		return nil
+	})
 }

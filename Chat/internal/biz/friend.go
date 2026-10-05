@@ -145,6 +145,9 @@ func (uc *FriendUseCase) ApplyFriend(ctx context.Context, fromUID, toUID int64, 
 		return nil, true, nil
 	}
 
+	if err := ensureUsersExist(ctx, uc.users, []int64{toUID}); err != nil {
+		return nil, false, err
+	}
 	// 已有待处理申请时直接复用，避免用户连点产生一堆申请
 	if pending, err := uc.repo.FindPendingRequest(ctx, fromUID, toUID); err != nil {
 		uc.log.Errorw("msg", "查询待处理好友申请失败",

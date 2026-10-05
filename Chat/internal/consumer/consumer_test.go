@@ -34,6 +34,9 @@ func (f *fakeConvRepo) ListByUser(context.Context, int64) ([]*biz.UserConversati
 func (f *fakeConvRepo) FindPeerIDs(context.Context, []int64, int64) (map[int64]int64, error) {
 	return nil, nil
 }
+func (f *fakeConvRepo) FindMemberAliases(context.Context, map[int64]int64) (map[int64]string, error) {
+	return nil, nil
+}
 func (f *fakeConvRepo) AddMembers(context.Context, int64, []*biz.ConversationMember) (int, error) {
 	return 0, nil
 }
@@ -48,6 +51,9 @@ func (f *fakeConvRepo) UpdateMemberReadSeq(context.Context, int64, int64, int64)
 func (f *fakeConvRepo) UpdateMemberAlias(context.Context, int64, int64, string) error  { return nil }
 func (f *fakeConvRepo) UpdateMaxSeq(context.Context, int64, int64) error               { return nil }
 func (f *fakeConvRepo) Update(context.Context, *biz.Conversation) error                { return nil }
+func (f *fakeConvRepo) UpdateGroupInfo(context.Context, int64, int64, *biz.GroupInfoPatch) error {
+	return nil
+}
 
 // fakeLoader 按 (会话, seq) 返回预置消息。
 type fakeLoader struct {
@@ -101,6 +107,30 @@ func (p *fakePusher) pushCount() int {
 }
 
 func testLogger() klog.Logger { return klog.NewStdLogger(discardWriter{}) }
+
+func TestRecallPushUsesNewSequenceAndHidesOriginal(t *testing.T) {
+	original := &biz.Message{ID: 10, ConversationID: 1, Seq: 1, SenderID: 100, Type: biz.MessageTypeText, Status: biz.MessageStatusRecalled, Content: "private original", Extra: `{"private":"attachment"}`}
+	notice := &biz.Message{ID: 11, ConversationID: 1, Seq: 121, SenderID: 100, Type: biz.MessageTypeRecall, Status: biz.MessageStatusNormal, Extra: `{"recallMessageId":"10"}`}
+	loader := &fakeLoader{messages: map[string]*biz.Message{msgKey(1, 1): original, msgKey(1, 121): notice}}
+	pusher := &fakePusher{online: map[int64]bool{100: true, 200: true}}
+	consumer := newTestConsumer(loader, pusher)
+	for _, seq := range []int64{1, 121, 121} {
+		if err := consumer.Handle(context.Background(), "chat", "1", eventFor(1, seq)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pusher.pushCount() != 4 {
+		t.Fatalf("recall must not be deduped as original; duplicate event must be ignored: %d", pusher.pushCount())
+	}
+	body := pusher.payload[0].Data.(pushPayload)
+	if body.Content != "" || body.Extra != "" || body.Status != biz.MessageStatusRecalled {
+		t.Fatalf("body leaked: %+v", body)
+	}
+	update := pusher.payload[2].Data.(pushPayload)
+	if update.Seq != 121 || update.RecallMessageID != 10 || update.Type != biz.MessageTypeRecall {
+		t.Fatalf("recall update lost: %+v", update)
+	}
+}
 
 type discardWriter struct{}
 

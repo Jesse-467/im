@@ -150,6 +150,7 @@ func (s *HTTPServer) registerRoutes(c *conf.Config, svc *service.ChatService, ve
 	api.POST("/group/group_user_list", svc.HTTPGroupUserList)
 	api.POST("/group/member_list", svc.HTTPGroupMemberList)
 	api.POST("/group/quit", svc.HTTPQuitGroup)
+	api.POST("/group/update", svc.HTTPUpdateGroup)
 }
 
 // requireAuth 校验 Authorization 头中的 Bearer 令牌，并把 uid 注入 context。

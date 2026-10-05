@@ -11,7 +11,7 @@ import (
 // 群名称长度约束
 const (
 	groupNameMaxLen = 50
-	groupMaxMembers = 500
+	GroupMaxMembers = 500
 )
 
 // GroupMemberDetail 是群成员详情，含展示所需的用户资料。
@@ -51,8 +51,7 @@ func NewGroupUseCase(
 
 // CreateGroup 创建群聊。
 //
-// memberIDs 中的无效项（自己、重复、不存在的用户）会被静默跳过，
-// 返回值中的 addedCount 是实际加入的人数，便于调用方感知差异。
+// 自己和重复 ID 会被跳过；不存在的账号使整个请求失败，避免无效群成员。
 //
 // 说明：这里刻意不校验"邀请人与被邀请人必须是好友"。群聊的常见用法是把
 // 同事、客户等尚未建立好友关系的人拉进同一个讨论组，强制好友关系会让
@@ -91,10 +90,17 @@ func (uc *GroupUseCase) CreateGroup(ctx context.Context, ownerID int64, name str
 		seen[uid] = struct{}{}
 		members = append(members, &ConversationMember{UserID: uid, Role: MemberRoleMember})
 	}
-	if len(members) > groupMaxMembers {
+	if len(members) > GroupMaxMembers {
 		uc.log.Warnw("msg", "建群时成员数超出上限",
-			"owner", ownerID, "members", len(members), "max", groupMaxMembers)
+			"owner", ownerID, "members", len(members), "max", GroupMaxMembers)
 		return nil, 0, ErrGroupMemberLimitExceeded
+	}
+	ids := make([]int64, 0, len(members))
+	for _, member := range members {
+		ids = append(ids, member.UserID)
+	}
+	if err := ensureUsersExist(ctx, uc.users, ids); err != nil {
+		return nil, 0, err
 	}
 
 	conv := &Conversation{
@@ -130,6 +136,9 @@ func (uc *GroupUseCase) AddMembers(ctx context.Context, conversationID, operator
 	}
 	operator, err := uc.mustBeMember(ctx, conversationID, operatorID)
 	if err != nil {
+		return 0, err
+	}
+	if err := uc.mustBeGroup(ctx, conversationID); err != nil {
 		return 0, err
 	}
 	if operator.Role != MemberRoleOwner && operator.Role != MemberRoleAdmin {
@@ -168,11 +177,18 @@ func (uc *GroupUseCase) AddMembers(ctx context.Context, conversationID, operator
 
 	// 上限校验放在去重之后：用「现有 + 本次真实新增」判断，
 	// 否则重复传入已在群内的 ID 会被误判为超限。
-	if len(existing)+len(members) > groupMaxMembers {
+	if len(existing)+len(members) > GroupMaxMembers {
 		uc.log.Warnw("msg", "群成员数将超出上限",
 			"conversationId", conversationID,
-			"existing", len(existing), "adding", len(members), "max", groupMaxMembers)
+			"existing", len(existing), "adding", len(members), "max", GroupMaxMembers)
 		return 0, ErrGroupMemberLimitExceeded
+	}
+	ids := make([]int64, 0, len(members))
+	for _, member := range members {
+		ids = append(ids, member.UserID)
+	}
+	if err := ensureUsersExist(ctx, uc.users, ids); err != nil {
+		return 0, err
 	}
 
 	added, err := uc.convRepo.AddMembers(ctx, conversationID, members)
@@ -189,6 +205,9 @@ func (uc *GroupUseCase) AddMembers(ctx context.Context, conversationID, operator
 func (uc *GroupUseCase) RemoveMember(ctx context.Context, conversationID, operatorID, targetID int64) error {
 	operator, err := uc.mustBeMember(ctx, conversationID, operatorID)
 	if err != nil {
+		return err
+	}
+	if err := uc.mustBeGroup(ctx, conversationID); err != nil {
 		return err
 	}
 	if operator.Role != MemberRoleOwner && operator.Role != MemberRoleAdmin {
@@ -240,6 +259,9 @@ func (uc *GroupUseCase) QuitGroup(ctx context.Context, conversationID, userID in
 	if err != nil {
 		return err
 	}
+	if err := uc.mustBeGroup(ctx, conversationID); err != nil {
+		return err
+	}
 	if member.Role == MemberRoleOwner {
 		uc.log.Warnw("msg", "群主尝试退群被拒",
 			"conversationId", conversationID, "uid", userID)
@@ -254,69 +276,60 @@ func (uc *GroupUseCase) QuitGroup(ctx context.Context, conversationID, userID in
 	return nil
 }
 
-// UpdateGroupInfo 更新群资料，或更新自己在群内的昵称。
-func (uc *GroupUseCase) UpdateGroupInfo(ctx context.Context, conversationID, operatorID int64, name, avatarURL, aliasName string) error {
+// GroupInfoPatch 区分未传与显式清空。群名不可空，头像/本人群昵称可恢复默认。
+type GroupInfoPatch struct {
+	Name      *string
+	AvatarURL *string
+	AliasName *string
+}
+
+// UpdateGroupInfo 先校验所有字段与权限，再原子保存，失败不能先改掉群内昵称。
+func (uc *GroupUseCase) UpdateGroupInfo(ctx context.Context, conversationID, operatorID int64, patch *GroupInfoPatch) error {
+	if patch == nil || (patch.Name == nil && patch.AvatarURL == nil && patch.AliasName == nil) {
+		return ErrInvalidParam
+	}
 	member, err := uc.mustBeMember(ctx, conversationID, operatorID)
 	if err != nil {
 		return err
 	}
-
-	// 备注名是成员维度的属性，任何人都可以改自己的
-	if alias := strings.TrimSpace(aliasName); alias != "" {
-		if len([]rune(alias)) > 32 {
-			uc.log.Warnw("msg", "群内昵称超长",
-				"conversationId", conversationID, "uid", operatorID,
-				"len", len([]rune(alias)), "max", 32)
-			return ErrInvalidParam
-		}
-		if err := uc.convRepo.UpdateMemberAlias(ctx, conversationID, operatorID, alias); err != nil {
-			uc.log.Errorw("msg", "更新群内昵称失败",
-				"conversationId", conversationID, "uid", operatorID, "err", err)
-			return err
-		}
-		uc.log.Infow("msg", "群内昵称已更新",
-			"conversationId", conversationID, "uid", operatorID)
+	if err := uc.mustBeGroup(ctx, conversationID); err != nil {
+		return err
 	}
-
-	name = strings.TrimSpace(name)
-	avatarURL = strings.TrimSpace(avatarURL)
-	if name == "" && avatarURL == "" {
-		return nil
-	}
-
-	// 群名与群头像属于群维度，只有群主与管理员可以改
-	if member.Role != MemberRoleOwner && member.Role != MemberRoleAdmin {
-		uc.log.Warnw("msg", "无权限修改群资料",
-			"conversationId", conversationID, "operator", operatorID, "role", member.Role)
+	if (patch.Name != nil || patch.AvatarURL != nil) && member.Role != MemberRoleOwner && member.Role != MemberRoleAdmin {
 		return ErrNoPermission
 	}
-	if name != "" && len([]rune(name)) > groupNameMaxLen {
-		uc.log.Warnw("msg", "群名超长",
-			"conversationId", conversationID, "operator", operatorID,
-			"len", len([]rune(name)), "max", groupNameMaxLen)
-		return ErrInvalidParam
+	if patch.Name != nil {
+		name := strings.TrimSpace(*patch.Name)
+		if name == "" || len([]rune(name)) > groupNameMaxLen {
+			return ErrInvalidParam
+		}
+		patch.Name = &name
 	}
+	if patch.AvatarURL != nil {
+		avatar := strings.TrimSpace(*patch.AvatarURL)
+		if len([]rune(avatar)) > 512 {
+			return ErrInvalidParam
+		}
+		patch.AvatarURL = &avatar
+	}
+	if patch.AliasName != nil {
+		alias := strings.TrimSpace(*patch.AliasName)
+		if len([]rune(alias)) > 32 {
+			return ErrInvalidParam
+		}
+		patch.AliasName = &alias
+	}
+	return uc.convRepo.UpdateGroupInfo(ctx, conversationID, operatorID, patch)
+}
 
+func (uc *GroupUseCase) mustBeGroup(ctx context.Context, conversationID int64) error {
 	conv, err := uc.convRepo.FindByID(ctx, conversationID)
 	if err != nil {
-		uc.log.Errorw("msg", "修改群资料时查询会话失败",
-			"conversationId", conversationID, "err", err)
 		return err
 	}
-	if name != "" {
-		conv.Name = name
+	if conv == nil || conv.Type != ConversationTypeGroup {
+		return ErrConversationTypeInvalid
 	}
-	if avatarURL != "" {
-		conv.AvatarURL = avatarURL
-	}
-	if err := uc.convRepo.Update(ctx, conv); err != nil {
-		uc.log.Errorw("msg", "更新群资料失败",
-			"conversationId", conversationID, "operator", operatorID, "err", err)
-		return err
-	}
-	uc.log.Infow("msg", "群资料已更新",
-		"conversationId", conversationID, "operator", operatorID,
-		"name", conv.Name)
 	return nil
 }
 

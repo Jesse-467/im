@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Jesse-467/im/Chat/internal/biz"
 	"github.com/Jesse-467/im/Chat/internal/errs"
 	"github.com/Jesse-467/im/Chat/internal/httpx"
 )
@@ -28,11 +29,12 @@ type conversationItemDTO struct {
 	// 展示名：单聊为对方昵称或备注名，群聊为群名
 	AliasName string `json:"aliasName"`
 	AvatarUrl string `json:"avatarUrl"`
-	// 未读数 = 会话最大序号 - 我的已读位点
-	UnreadCount int64       `json:"unreadCount"`
-	LastReadSeq int64       `json:"lastReadSeq"`
-	MaxSeq      int64       `json:"maxSeq"`
-	LastMsg     *chatMsgDTO `json:"lastMsg"`
+	// 成员维护的真实未读数，不等于最大序号与已读位点之差。
+	UnreadCount    int64       `json:"unreadCount"`
+	LastReadSeq    int64       `json:"lastReadSeq"`
+	MaxSeq         int64       `json:"maxSeq"`
+	LastMsg        *chatMsgDTO `json:"lastMsg"`
+	LastSenderName string      `json:"lastSenderName,omitempty"`
 }
 
 type messageGroupInfoListResp struct {
@@ -65,6 +67,7 @@ func (s *ChatService) HTTPMessageGroupInfoList(c *gin.Context) {
 			LastReadSeq:    it.LastReadSeq,
 			MaxSeq:         it.Conversation.MaxSeq,
 			LastMsg:        toChatMsgDTO(it.LastMessage),
+			LastSenderName: it.LastSenderName,
 		})
 	}
 	httpx.OK(c, messageGroupInfoListResp{List: list})
@@ -347,6 +350,36 @@ func (s *ChatService) HTTPQuitGroup(c *gin.Context) {
 	}
 
 	if err := s.groupUC.QuitGroup(c.Request.Context(), convID, uid); err != nil {
+		httpx.Fail(c, toErrs(err))
+		return
+	}
+	httpx.OK(c, quitGroupResp{Success: true})
+}
+
+type updateGroupReq struct {
+	conversationRef
+	Name      *string `json:"name"`
+	AvatarURL *string `json:"avatarUrl"`
+	AliasName *string `json:"aliasName"`
+}
+
+// HTTPUpdateGroup 保存群资料和本人的群内昵称。
+func (s *ChatService) HTTPUpdateGroup(c *gin.Context) {
+	uid, ok := currentUID(c)
+	if !ok {
+		return
+	}
+	var req updateGroupReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Fail(c, errs.Wrap(err, errs.CodeParamError, "参数校验失败"))
+		return
+	}
+	convID, err := req.resolve(s, c)
+	if err != nil {
+		httpx.Fail(c, toErrs(err))
+		return
+	}
+	if err := s.groupUC.UpdateGroupInfo(c.Request.Context(), convID, uid, &biz.GroupInfoPatch{Name: req.Name, AvatarURL: req.AvatarURL, AliasName: req.AliasName}); err != nil {
 		httpx.Fail(c, toErrs(err))
 		return
 	}

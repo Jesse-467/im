@@ -105,14 +105,15 @@
 | 功能 | 方法 | 路径 | 说明 |
 | --- | --- | --- | --- |
 | 创建群聊 | POST | `/api/group/create_group_chat` | 创建者为群主 |
-| 拉人入群 | POST | `/api/group/add_group_chat` | 仅群成员可操作 |
+| 拉人入群 | POST | `/api/group/add_group_chat` | 仅群主或管理员可操作 |
 | 群成员 ID 列表 | POST | `/api/group/group_user_list` | 仅返回用户 ID |
 | 群成员详情 | POST | `/api/group/member_list` | 含昵称、头像、角色 |
 | 退出群聊 | POST | `/api/group/quit` | 群主不能退出 |
+| 修改群资料 | POST | `/api/group/update` | 群主/管理员改群名头像，成员改本人群昵称 |
 
 → 详情：[创建群聊](#post-apigroupcreate_group_chat) · [拉人入群](#post-apigroupadd_group_chat) ·
 [成员 ID 列表](#post-apigroupgroup_user_list) · [成员详情](#post-apigroupmember_list) ·
-[退出群聊](#post-apigroupquit)
+[退出群聊](#post-apigroupquit) · [修改群资料](#post-apigroupupdate)
 
 ### 6. 实时通信（WebSocket）
 
@@ -450,6 +451,7 @@
 | --- | --- |
 | `4002` | `userId` 缺失或非法、附言超长 |
 | `4004` | 不能添加自己 |
+| `4003` | 目标用户不存在，不创建申请 |
 
 > 重复点击申请不会产生多条记录：已有待处理申请时服务端直接复用。
 > 已过期的旧申请会先置为「已过期」，把待处理唯一键让出来。
@@ -599,6 +601,11 @@
 | `lastReadSeq` | 我的已读位点 |
 | `maxSeq` | 会话最新序号 |
 | `lastMsg` | 最后一条消息，无消息时为 `null` |
+| `lastSenderName` | 群聊最后发送者的群昵称，未设置则使用个人昵称；无消息或单聊省略 |
+
+群聊列表摘要：他人消息显示 `lastSenderName：内容`，本人消息只显示内容；不要为自己添加“我：”前缀。发送者群昵称由服务端批量查询，无需先打开群或逐群拉取成员。群成员自己的 `aliasName` 不覆盖会话群名。
+
+消息对象新增 `status`（`1` 正常、`2` 已撤回）与可选字符串 `recallMessageId`。已撤回原消息的 `content` 始终为空，不再向客户端传输正文；客户端显示撤回提示。`type=6` 为服务端生成的撤回事件，`recallMessageId` 指向原消息，正文为“撤回了一条消息”。该事件具有自己的新 `seq`，同时更新会话摘要与水位。
 
 > **补齐离线消息的方法**：比较每个会话的 `maxSeq` 与 `lastReadSeq`，
 > 对落后的会话调 [`/api/message/sync`](#post-apimessagesync)。
@@ -758,13 +765,12 @@
 
 | code | 场景 |
 | --- | --- |
-| `4003` | 消息不存在 |
-| `4004` | 消息不可撤回：不存在、非本人发送、或已被撤回 |
+| `4004` | 消息不可撤回：不存在、非本人发送、已删除或试图撤回撤回事件 |
 | `4006` | 不是会话成员 |
 
-> 「消息不存在」「非发送者本人」「已被撤回」三种情况**统一返回 `4004`**，
-> 服务端不区分。这样既简化了客户端处理，也避免通过错误码泄露
-> 「某条消息是否存在」这一信息。
+> 不存在或非本人消息统一返回 `4004`，不泄露他人消息状态。本人重复撤回同一消息返回成功，但不会重复追加撤回事件或未读数。
+
+撤回原消息状态、写入 `type=6` 撤回事件、推进会话水位/未读数及写入 Outbox 在同一数据库事务中完成。任一步失败都回滚，不能出现“本端撤回成功但没有可同步事件”。客户端按原增量同步协议取得撤回事件，更新 `recallMessageId` 对应的已缓存消息；原消息尚未加载时可先显示撤回通知，历史翻到原消息后只保留一次提示。正常发送接口不接受 `type=6`，客户端不能伪造撤回事件。
 
 ---
 
@@ -781,7 +787,7 @@
 | `toUid` | array | 否 | — | 兼容旧字段名 |
 
 > 「最多 499 个」是因为上限校验统计的是**含创建者在内的总人数**
-> （`groupMaxMembers = 500`）。
+> （`GroupMaxMembers = 500`）。
 > 数组元素可混用字符串与数字形式；非法值（`0`、负数）会被自动过滤。
 
 **响应**
@@ -800,15 +806,17 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `addedCount` | 实际加入的成员数（不含创建者），便于感知无效成员被跳过 |
+| `addedCount` | 去重后实际加入的成员数（不含创建者） |
 
 **错误**
 
 | code | 场景 |
 | --- | --- |
-| `4002` | 群名为空或超长、成员数超上限 |
+| `4002` | 群名为空或超长 |
+| `4004` | 成员数超过 500 人上限 |
+| `4003` | 任一成员用户不存在；整次创建失败，不保留半个群 |
 
-> **创建群聊不校验好友关系**：可以把任意用户直接拉进新群。
+> **创建群聊不校验好友关系，但必须是存在的用户**：批量校验用户存在性后再创建。
 > 这是刻意的取舍——建群时逐个校验好友会引入 N 次跨服务调用，
 > 且许多产品形态（如拉陌生人进临时群）本就不要求好友关系。
 > 若业务上需要限制，应在网关或上游业务层加白名单。
@@ -836,13 +844,12 @@
 
 | code | 场景 |
 | --- | --- |
-| `4003` | 会话不存在 |
-| `4006` | 不是群成员 |
-| `4002` | 超过群成员上限（500） |
+| `4003` | 群不存在或任一被邀请用户不存在 |
+| `4006` | 不是群成员，或不是群主/管理员 |
+| `4002` | 会话不是群聊 |
+| `4004` | 超过群成员上限（500） |
 
-> **当前只校验「操作者是群成员」**，不限制角色，也不校验被拉入者是否为好友。
-> 若产品上要求「仅群主可拉人」，需在 biz 层补上角色判断
-> （可参考 `RemoveMember` 的写法）。
+> 邀请入口仅群主与管理员可操作，服务端同样校验角色。已在群内的用户不重复计数，退群的用户可以重新加入；重入时角色重置为普通成员，已读位点设为当前水位、未读数归零，不把离开期间消息计为未读。会话行锁保证并发邀请/退群时真实人数与 500 人上限一致。
 
 #### POST api-group-group_user_list
 
@@ -931,11 +938,31 @@
 
 | code | 场景 |
 | --- | --- |
-| `4006` | **群主不能退出**（需先转让群主或解散群聊） |
+| `4006` | 非成员，或**群主不能退出**（当前未提供转让/解散接口） |
 | `4003` | 会话不存在 |
+| `4002` | 会话不是群聊，不能通过退群接口离开单聊 |
 
 > 退群采用**软删除**：成员行保留但标记 `left_at`，因此历史消息不会失去发送者，
 > 重新入群也能复用同一行。
+
+退群与人数更新在同一事务内完成，未读归零；客户端应立即从列表移除该群、关闭当前群并清除该群的本地缓存。
+
+#### POST api-group-update
+
+`POST /api/group/update` —— 原子修改群资料与本人的群昵称。
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `conversationId` / `groupId` | 字符串或数字 / string | 二选一 | 群会话标识 |
+| `name` | string | 否 | 群主/管理员可改；去首尾空格后 1～50 字符 |
+| `avatarUrl` | string | 否 | 群主/管理员可改；≤512 字符，空字符串恢复默认头像 |
+| `aliasName` | string | 否 | 修改本人群昵称，≤32 字符，空字符串恢复个人昵称 |
+
+未提供的字段保持原样。整次请求先做权限与参数校验，再用单事务保存；越权或非法群名不能先修改本人昵称。只写资料字段，不覆盖消息水位与人数。
+
+**响应**：`{ "code": 0, "msg": "OK", "data": { "success": true } }`。
+
+**错误**：`4002` 参数非法/会话不是群聊；`4003` 群不存在；`4006` 非成员或普通成员试图改群名/头像。
 
 ---
 
@@ -1021,11 +1048,13 @@ ws://<host>:8002/ws?token=<accessToken>
 | `messageId` | string | 消息 ID |
 | `seq` | number | 会话内序号 |
 | `senderId` | string | 发送者 |
-| `type` | number | 消息类型 `1`~`5` |
-| `content` | string | 消息正文 |
+| `type` | number | 消息类型 `1`~`5`；`6` 为服务端撤回事件 |
+| `content` | string | 消息正文；原消息 `status=2` 时为空 |
 | `extra` | string | 扩展信息。**为空时不出现**（`omitempty`） |
 | `clientMsgId` | string | 幂等键，客户端可用于对应自己发出的消息 |
 | `createTime` | number | 毫秒时间戳 |
+| `status` | number | `1` 正常，`2` 已撤回 |
+| `recallMessageId` | string | `type=6` 时指向被撤回的原消息；其他类型省略 |
 
 **错误提示**
 
@@ -1543,7 +1572,10 @@ service.HTTPMessageGroupInfoList
         │     └─ conversation JOIN conversation_member（一次联表，避免 N+1）
         │           WHERE m.user_id = ? AND m.left_at IS NULL
         │           ORDER BY c.updated_at DESC
-        ├─ 单聊：repo.FindPeerIDs 批量取「对方」，再批量取昵称头像
+        ├─ 单聊：repo.FindPeerIDs 批量取「对方」
+        ├─ repo.FindLastByConversations 批量取最后消息
+        ├─ 群聊：repo.FindMemberAliases 批量取最后发送者群昵称
+        ├─ UserProvider.BatchGetBriefs 一次取对方与发送者的昵称头像
         └─ 组装 UserConversation（含未读数、最后一条消息）
 ```
 
@@ -1797,23 +1829,26 @@ service.HTTPPull
 service.HTTPRecall
   └─▶ biz.MessageUseCase.Recall(convID, messageID, operatorID)
         ├─ convRepo.FindMember（非成员拒绝）
-        └─▶ repo.Recall（条件更新）
-              UPDATE message
-              SET status = 2, recalled_at = now(), recalled_by = ?
-              WHERE id = ? AND conversation_id = ? AND sender_id = ? AND status = 1
-              └─ 影响 0 行 → ErrMessageNotRecallable
+        ├─ repo.FindByID（校验本人/状态，已撤回则幂等成功）
+        ├─ 分配撤回事件的新 ID / seq / senderSeq，构造 Outbox
+        └─▶ repo.Recall（事务）
+              ├─ 原消息条件更新 status = 2 / recalled_at / recalled_by
+              ├─ INSERT 撤回事件（type=6，extra.recallMessageId=原 ID）
+              ├─ 推进 max_seq，其他成员未读 +1
+              └─ INSERT Outbox → Relay → Consumer → WS/离线补齐
 ```
 
 **关键点**
 
 - **三个约束放进同一条 WHERE**：属于该会话、由本人发送、当前处于正常状态。
   若是「先查再改」，并发下两次撤回都会成功。
-- 影响 0 行时统一返回 `4004`，不区分「不存在」「非本人」「已撤回」——
-  这些细节对客户端没有意义，反而会泄露消息是否存在。
+- 不存在或非本人返回 `4004`；本人重复撤回幂等成功，不再追加事件。
+- 撤回事件使用新的 `seq`，不会被按 `(conversationId, seq)` 去重的消费者误当成原消息重复推送。离线端同样能按新水位同步变更，而不是只刷新最近一页。
+- 历史、会话摘要、WS 下发均隐藏已撤回正文；WS 同时不再下发原消息的附件扩展字段。存储原文保留作内部追溯。
 - **不内置时间限制**：撤回时限属于产品策略（如微信的 2 分钟），
   写死在领域层会让不同业务线无法差异化配置。需要时应由调用方自行判断。
 
-**涉及的表**：`message`
+**涉及的表**：`message`、`conversation`、`conversation_member`、`message_outbox`。无需新增表或列，事件扩展信息使用既有 JSONB `extra`。
 
 ---
 
@@ -1832,6 +1867,7 @@ service.HTTPCreateGroupChat
         ├─ idGen.Next() → 会话 ID（先取 ID 才能拼 biz_key）
         ├─ 成员去重 + 滤除自己，创建者插入为「群主」
         ├─ 校验总人数 ≤ 500
+        ├─ 批量校验成员用户均存在，任一缺失则整次失败
         └─▶ convRepo.Create(会话 + 全部成员行，单事务)
 ```
 
@@ -1854,24 +1890,24 @@ service.HTTPCreateGroupChat
 ```
 service.HTTPAddGroupChat
   └─▶ biz.GroupUseCase.AddMembers(convID, operatorID, userIDs)
-        ├─ mustBeMember(operatorID)          → 非成员 403
-        ├─ repo.ListMembers 取现有成员，校验总数 ≤ 500
-        └─▶ convRepo.AddMembers（ON CONFLICT DO UPDATE SET left_at = NULL）
-              └─ RowsAffected > 0 时 UPDATE member_count = member_count + n
+        ├─ mustBeMember + mustBeGroup + 群主/管理员角色校验
+        ├─ 成员去重，批量校验被邀请用户存在
+        └─▶ convRepo.AddMembers（单事务）
+              ├─ SELECT conversation FOR UPDATE
+              ├─ 查实际有效成员，跳过已在群内成员，校验容量 ≤ 500
+              ├─ 插入新成员/重置离开成员的入群状态
+              └─ member_count = 实际有效人数 + 本次新增人数
 ```
 
 **关键点**
 
-- **权限校验在 biz 层**：`mustBeMember` 拦住非成员，不依赖前端隐藏按钮。
-  但**当前只校验身份，不校验角色**——任何群成员都能拉人入群。
-  若产品要求「仅群主/管理员可拉人」，需要在 biz 层补角色判断。
+- **权限校验在 biz 层**：非成员与普通成员均不可邀请，不能只依赖前端隐藏按钮。
 - **`ON CONFLICT DO UPDATE SET left_at = NULL`** 而不是单纯的 `DO NOTHING`：
   退过群的人再次入群时，若只做 `DO NOTHING`，会因唯一约束而加不进来，
   表现为「拉人成功但对方看不到群」这类难查的问题。
 - **`RowsAffected` 精确反映真实新增人数**，因此 `cnt` 不会把「已在群内」
   的人重复计入。
-- **`member_count` 用表达式自增**而不是「先读再写」：并发拉人时后者会丢更新。
-  计数只增不减（成员是软删除，行仍在）。
+- **会话行锁保护人数更新**：邀请与退群共用行锁，人数代表当前有效成员，不代表历史成员行数。
 
 **涉及的表**：`conversation`、`conversation_member`
 
@@ -1928,13 +1964,13 @@ service.HTTPQuitGroup
 
 **关键点**
 
-- **群主不能直接退出**：群聊会失去所有者。正确做法是先转让群主或解散群聊。
+- **群主不能直接退出**：群聊不能失去所有者。当前未实现转让/解散，客户端明确提示而非提供无效操作。
 - **软删除而非物理删除**，三个理由：保留「谁什么时候退的群」便于追溯与合规；
   重新入群可复用同一行，不会因唯一约束冲突而失败；历史消息的发送者引用
   不会变成悬空。
 - **重复调用天然幂等**：条件里限定 `left_at IS NULL`，已离开的行不会被再次更新。
 
-**涉及的表**：`conversation_member`
+**涉及的表**：`conversation_member`、`conversation`（行锁与人数更新）
 
 ---
 
@@ -2158,6 +2194,7 @@ conf.Load()
 | 23 | Chat | GET | `/ws` | 实时通信 |
 | 24 | 两者 | GET | `/healthz` | 运维 |
 | 25 | 两者 | GET | `/readyz` | 运维 |
+| 26 | Chat | POST | `/api/group/update` | 群聊 |
 
 ### 4.2 约束速查
 
@@ -2177,6 +2214,7 @@ conf.Load()
 | 拉取条数 | 默认 20，最大 200 | Chat 拉取 / 同步 |
 | 好友申请列表条数 | 默认 50，最大 200 | Chat 申请列表 |
 | 群名长度 | 1 ~ 50 字符 | Chat 创建群聊 |
+| 群内昵称长度 | ≤32 字符，空字符串恢复个人昵称 | Chat 修改群资料 |
 | 群成员上限 | 500（含创建者，故初始成员最多 499） | Chat 建群 / 拉人 |
 | 群成员角色 | `0` 成员 / `1` 管理员 / `2` 群主 | Chat 成员详情 |
 | WS 上行单条上限 | 4096 字节 | Chat WebSocket |

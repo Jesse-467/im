@@ -84,13 +84,15 @@ type UserConversation struct {
 type ConversationItem struct {
 	Conversation *Conversation
 	// DisplayName / DisplayAvatar 已按会话类型解析：
-	// 单聊取对方昵称与头像，群聊取群名与群头像，且优先使用成员备注名。
+	// 单聊优先成员备注名，再取对方昵称与头像；群聊取群名与群头像。
 	DisplayName   string
 	DisplayAvatar string
 	// LastMessage 可能为 nil（会话刚建立、还没有任何消息）
 	LastMessage *Message
-	UnreadCount int64
-	LastReadSeq int64
+	// LastSenderName 仅群聊有值：发送者的群内昵称优先于个人昵称。
+	LastSenderName string
+	UnreadCount    int64
+	LastReadSeq    int64
 }
 
 // 会话业务去重键的前缀。
@@ -141,6 +143,8 @@ type ConversationRepo interface {
 	// FindPeerIDs 批量查询单聊会话中"对方"的用户 ID，返回 conversationID -> peerUserID。
 	// 单独开这个接口是为了避免会话列表对每个单聊逐个查成员造成 N+1。
 	FindPeerIDs(ctx context.Context, conversationIDs []int64, selfID int64) (map[int64]int64, error)
+	// FindMemberAliases 批量查询 conversationID -> senderID 对应的群内昵称。
+	FindMemberAliases(ctx context.Context, senders map[int64]int64) (map[int64]string, error)
 
 	// AddMembers 批量加入成员；已存在的成员自动跳过，返回实际新增数量。
 	// 依赖唯一约束实现幂等，因此重复调用是安全的。
@@ -158,6 +162,8 @@ type ConversationRepo interface {
 	UpdateMaxSeq(ctx context.Context, conversationID, seq int64) error
 	// Update 更新会话自身的属性（群名、群头像、状态等）
 	Update(ctx context.Context, conv *Conversation) error
+	// UpdateGroupInfo 原子更新群资料与本人成员昵称，只写显式提供的字段。
+	UpdateGroupInfo(ctx context.Context, conversationID, userID int64, patch *GroupInfoPatch) error
 }
 
 // ConversationUseCase 承载会话领域的用例。
@@ -189,7 +195,7 @@ func NewConversationUseCase(
 // ListConversations 返回用户的会话列表，对应消息页首屏。
 //
 // 组装顺序刻意如此：会话与成员一次查询、对方 ID 一次查询、最后一条消息一次查询、
-// 用户资料一次跨服务调用。全程固定 4 次 IO，不随会话数量线性增长。
+// 群消息发送者昵称一次查询，用户资料一次跨服务调用，避免逐群查询成员。
 func (uc *ConversationUseCase) ListConversations(ctx context.Context, userID int64) ([]*ConversationItem, error) {
 	if userID <= 0 {
 		uc.log.Warnw("msg", "查询会话列表参数非法", "uid", userID)
@@ -226,14 +232,35 @@ func (uc *ConversationUseCase) ListConversations(ctx context.Context, userID int
 		return nil, err
 	}
 
-	peerIDs := make([]int64, 0, len(peerOf))
+	userIDs := make([]int64, 0, len(peerOf)+len(lastMsgs))
+	seenUsers := make(map[int64]bool)
 	for _, pid := range peerOf {
-		peerIDs = append(peerIDs, pid)
+		if !seenUsers[pid] {
+			seenUsers[pid] = true
+			userIDs = append(userIDs, pid)
+		}
+	}
+	groupSenders := make(map[int64]int64)
+	for _, rel := range relations {
+		if msg := lastMsgs[rel.Conversation.ID]; rel.Conversation.Type == ConversationTypeGroup && msg != nil {
+			groupSenders[rel.Conversation.ID] = msg.SenderID
+			if !seenUsers[msg.SenderID] {
+				seenUsers[msg.SenderID] = true
+				userIDs = append(userIDs, msg.SenderID)
+			}
+		}
+	}
+	senderAliases := map[int64]string{}
+	if len(groupSenders) > 0 {
+		senderAliases, err = uc.repo.FindMemberAliases(ctx, groupSenders)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	briefs := map[int64]*UserBrief{}
-	if len(peerIDs) > 0 {
-		briefs, err = uc.users.BatchGetBriefs(ctx, peerIDs)
+	if len(userIDs) > 0 {
+		briefs, err = uc.users.BatchGetBriefs(ctx, userIDs)
 		if err != nil {
 			// 用户资料取不到不应导致整个会话列表失败，降级为无昵称展示并告警
 			uc.log.Errorw("msg", "获取用户资料失败，会话列表降级展示", "err", err, "uid", userID)
@@ -251,6 +278,17 @@ func (uc *ConversationUseCase) ListConversations(ctx context.Context, userID int
 			UnreadCount: rel.Member.UnreadCount,
 		}
 		item.DisplayName, item.DisplayAvatar = resolveDisplay(rel, peerOf[rel.Conversation.ID], briefs)
+		if senderID, ok := groupSenders[rel.Conversation.ID]; ok {
+			item.LastSenderName = senderAliases[rel.Conversation.ID]
+			if item.LastSenderName == "" {
+				if brief := briefs[senderID]; brief != nil {
+					item.LastSenderName = brief.Nickname
+				}
+			}
+			if item.LastSenderName == "" {
+				item.LastSenderName = fmt.Sprintf("用户%d", senderID)
+			}
+		}
 		items = append(items, item)
 	}
 
@@ -433,10 +471,10 @@ func (uc *ConversationUseCase) PeerOfSingle(ctx context.Context, conversationID,
 
 // resolveDisplay 解析会话的展示名与展示头像。
 //
-// 优先级：成员备注名 > 对方昵称 / 群名。取不到用户资料时用 ID 兜底，
+// 单聊备注优先于对方昵称；群内昵称不能替代群名。取不到用户资料时用 ID 兜底，
 // 保证前端不会出现完全空白的会话项。
 func resolveDisplay(rel *UserConversation, peerID int64, briefs map[int64]*UserBrief) (string, string) {
-	if rel.Member != nil && rel.Member.AliasName != "" {
+	if rel.Conversation.Type == ConversationTypeSingle && rel.Member != nil && rel.Member.AliasName != "" {
 		return rel.Member.AliasName, rel.Conversation.AvatarURL
 	}
 
