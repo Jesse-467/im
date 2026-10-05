@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { useAuthStore } from '@/store/auth'
 import { useChatStore } from '@/store/chat'
 import { toast } from '@/store/toast'
 import { TitleBar, ConnectionDot } from '@/components/TitleBar'
 import { Avatar } from '@/components/Avatar'
+import { Modal } from '@/components/Modal'
 import { ChatIcon, ContactsIcon, SettingsIcon, LogoutIcon } from '@/components/icons'
 import { ChatView } from './ChatView'
 import { ContactsView } from './ContactsView'
@@ -61,6 +62,16 @@ export function Shell(): JSX.Element {
       if (++tick % 3 === 0) void refreshSlow()
     }, 5000)
     return () => clearInterval(timer)
+  }, [refresh, syncActive, refreshSlow])
+
+  // 桌面窗口在后台时计时器可能被节流；重新切回时立即同步人数、资料和消息。
+  useEffect(() => {
+    const onFocus = (): void => {
+      void refresh().then(syncActive)
+      void refreshSlow()
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
   }, [refresh, syncActive, refreshSlow])
 
   const switchNav = (next: NavKey): void => {
@@ -181,38 +192,13 @@ export function Shell(): JSX.Element {
         <ConnectionDot ok={wsStatus === 'open'} />
       </div>
 
-      <AnimatePresence>
-        {confirmLogout && (
-          <motion.div
-            className="modal-overlay"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setConfirmLogout(false)
-            }}
-          >
-            <motion.div
-              className="modal-card confirm-card"
-              initial={{ opacity: 0, scale: 0.9, y: 12 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.94, y: 8 }}
-              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-            >
-              <h3>退出登录</h3>
-              <p>确定要退出当前账号吗？</p>
-              <div className="modal-actions">
-                <button className="ghost-btn" onClick={() => setConfirmLogout(false)}>
-                  取消
-                </button>
-                <button className="danger-btn" onClick={doLogout}>
-                  退出
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <Modal open={confirmLogout} title="退出登录" width={320} onClose={() => setConfirmLogout(false)}>
+        <p>确定要退出当前账号吗？</p>
+        <div className="modal-actions">
+          <button className="ghost-btn" onClick={() => setConfirmLogout(false)}>取消</button>
+          <button className="danger-btn" onClick={doLogout}>退出</button>
+        </div>
+      </Modal>
     </motion.div>
   )
 }

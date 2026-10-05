@@ -164,7 +164,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   refresh: async () => {
     try {
       const res = await apiConversationList()
-      set({ conversations: sortConversations(res.list ?? []), convLoaded: true })
+      const list = sortConversations(res.list ?? [])
+      set((s) => ({
+        conversations: list,
+        convLoaded: true,
+        activeConvId: s.activeConvId && list.some((c) => c.conversationId === s.activeConvId) ? s.activeConvId : null
+      }))
       void resolvePeers()
     } catch (err) {
       handleAuthError(err)
@@ -353,12 +358,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return {
           messagesByConv: {
             ...s.messagesByConv,
-            [conversationId]: list.map((m) => (m.id === messageId ? { ...m, recalled: true } : m))
+            [conversationId]: list.map((m) => (m.id === messageId ? { ...m, recalled: true, content: '' } : m))
           }
         }
       })
       toast('消息已撤回', 'success')
-      void get().refresh()
+      await get().refresh()
+      if (get().activeConvId === conversationId) await get().syncActive()
     } catch (err) {
       toast(err instanceof ApiError ? err.message : '撤回失败', 'error')
     }
@@ -408,9 +414,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   quitGroup: async (conversationId) => {
     await apiQuitGroup(conversationId)
     toast('已退出群聊', 'success')
-    set((s) => ({
-      activeConvId: s.activeConvId === conversationId ? null : s.activeConvId
-    }))
+    set((s) => {
+      const messages = { ...s.messagesByConv }
+      const cursors = { ...s.maxSeqByConv }
+      const members = { ...s.membersByConv }
+      const history = { ...s.historyByConv }
+      delete messages[conversationId]
+      delete cursors[conversationId]
+      delete members[conversationId]
+      delete history[conversationId]
+      return { activeConvId: s.activeConvId === conversationId ? null : s.activeConvId,
+        conversations: s.conversations.filter((c) => c.conversationId !== conversationId),
+        messagesByConv: messages, maxSeqByConv: cursors, membersByConv: members, historyByConv: history }
+    })
     await get().refresh()
   },
 

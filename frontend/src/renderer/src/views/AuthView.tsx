@@ -25,6 +25,7 @@ export function AuthView(): JSX.Element {
   const [nickName, setNickName] = useState('')
   const [gender, setGender] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
   const [serverOpen, setServerOpen] = useState(false)
 
   const login = useAuthStore((s) => s.login)
@@ -35,25 +36,27 @@ export function AuthView(): JSX.Element {
     setTab(next)
     setPassword('')
     setConfirm('')
+    setError('')
   }
 
   const submit = async (): Promise<void> => {
     if (busy) return
+    setError('')
     if (!isValidEmail(email)) {
-      toast('请输入正确的邮箱地址', 'error')
+      setError('请输入正确的邮箱地址')
       return
     }
     if (password.length < 6) {
-      toast('密码至少 6 位', 'error')
+      setError('密码至少 6 位')
       return
     }
     if (tab === 'register') {
       if (!nickName.trim()) {
-        toast('请填写昵称', 'error')
+        setError('请填写昵称')
         return
       }
       if (password !== confirm) {
-        toast('两次输入的密码不一致', 'error')
+        setError('两次输入的密码不一致')
         return
       }
     }
@@ -67,7 +70,7 @@ export function AuthView(): JSX.Element {
         await register({ email, password, nickName: nickName.trim(), gender })
       }
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : '操作失败，请稍后重试', 'error')
+      setError(err instanceof ApiError ? err.message : '操作失败，请稍后重试')
     } finally {
       setBusy(false)
     }
@@ -104,7 +107,7 @@ export function AuthView(): JSX.Element {
 
         <nav className="auth-tabs">
           {TABS.map((t) => (
-            <button key={t.key} className="auth-tab" onClick={() => switchTab(t.key)}>
+            <button key={t.key} className="auth-tab" disabled={busy} onClick={() => switchTab(t.key)}>
               {tab === t.key && (
                 <motion.span
                   layoutId="auth-tab-pill"
@@ -206,6 +209,7 @@ export function AuthView(): JSX.Element {
               </label>
             )}
 
+            {error && <p className="auth-error" role="alert">{error}</p>}
             <motion.button
               className={`primary-btn ${busy ? 'busy' : ''}`}
               whileHover={{ y: -1 }}

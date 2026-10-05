@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { createPortal } from 'react-dom'
 import { useChatStore, type LocalMsg } from '@/store/chat'
 import { useAuthStore } from '@/store/auth'
 import { Avatar } from '@/components/Avatar'
@@ -8,6 +9,7 @@ import { ChatIcon, SearchIcon, SendIcon, GroupIcon, ClockIcon, AlertIcon } from 
 import { formatDayLabel, formatListTime, formatMsgTime } from '@/core/format'
 import type { Conversation } from '@/api/types'
 import { GroupMembersModal } from './GroupMembersModal'
+import { messagesForDisplay } from '@/core/message-state'
 
 /**
  * 消息页：左侧会话卡片流 + 右侧聊天面板。
@@ -128,7 +130,7 @@ function ConversationCard({
   const draft = useChatStore((s) => s.messagesByConv[conv.conversationId]?.some((m) => m.failed))
 
   const preview = conv.lastMsg
-    ? conv.lastMsg.content.length > 40
+    ? conv.lastMsg.status === 2 ? '[消息已撤回]' : conv.lastMsg.content.length > 40
       ? `${conv.lastMsg.content.slice(0, 40)}…`
       : conv.lastMsg.content
     : '暂无消息'
@@ -163,7 +165,9 @@ function ConversationCard({
         </span>
         <span className="conv-card-row">
           <span className={`conv-card-preview ${draft ? 'has-failed' : ''}`}>
-            {conv.lastMsg?.senderId === meId ? '我: ' : ''}
+            {conv.type === 2 && conv.lastMsg && conv.lastMsg.senderId !== meId
+              ? `${conv.lastSenderName || `用户${conv.lastMsg.senderId}`}：`
+              : ''}
             {preview}
           </span>
           {conv.unreadCount > 0 ? (
@@ -188,6 +192,7 @@ function ConversationCard({
 function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void }): JSX.Element {
   const name = conv.aliasName || conv.name || `会话 ${conv.conversationId}`
   const messages = useChatStore((s) => s.messagesByConv[conv.conversationId]) ?? []
+  const displayed = useMemo(() => messagesForDisplay(messages), [messages])
   const members = useChatStore((s) => s.membersByConv[conv.conversationId])
   const sendText = useChatStore((s) => s.sendText)
   const retryText = useChatStore((s) => s.retryText)
@@ -206,6 +211,13 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
   const stickBottom = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const historyAnchor = useRef<{ height: number; top: number } | null>(null)
+
+  useEffect(() => {
+    if (!menu) return
+    const onEscape = (e: KeyboardEvent): void => { if (e.key === 'Escape') setMenu(null) }
+    document.addEventListener('keydown', onEscape)
+    return () => document.removeEventListener('keydown', onEscape)
+  }, [menu])
 
   useLayoutEffect(() => {
     const el = scrollRef.current
@@ -279,8 +291,8 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
             <div className="chat-header-sub">{subtitle}</div>
           </div>
         </div>
-        {conv.type === 2 && <button className="chat-header-members" onClick={() => setMembersOpen(true)} title="查看群成员">
-          <GroupIcon width={15} height={15} />群成员
+        {conv.type === 2 && <button className="chat-header-members" onClick={() => setMembersOpen(true)} title="查看群成员和群设置">
+          <GroupIcon width={15} height={15} />群聊详情
         </button>}
       </header>
 
@@ -301,8 +313,8 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
             hint={history?.loading || history?.error ? '' : '说点什么，开启这段对话'}
           />
         ) : (
-          messages.map((msg, idx) => {
-            const prev = messages[idx - 1]
+          displayed.map((msg, idx) => {
+            const prev = displayed[idx - 1]
             const showDay =
               !prev || new Date(prev.createTime).toDateString() !== new Date(msg.createTime).toDateString()
             return (
@@ -324,9 +336,13 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
                         ? conv.avatarUrl
                         : members?.find((x) => x.userId === msg.senderId)?.avatarUrl
                   }
-                  recallable={msg.senderId === meId && !msg.pending && !msg.failed && msg.id !== ''}
+                  recallable={msg.senderId === meId && !msg.pending && !msg.failed && !msg.recalled && msg.type !== 6 && msg.id !== ''}
                   onRetry={() => void retryText(conv.conversationId, msg.uuid)}
-                  onContextMenu={(x, y) => setMenu({ x, y, msg })}
+                  onContextMenu={(x, y) => setMenu({
+                    x: Math.max(8, Math.min(x, window.innerWidth - 148)),
+                    y: Math.max(8, Math.min(y, window.innerHeight - 64)),
+                    msg
+                  })}
                 />
               </div>
             )
@@ -364,7 +380,7 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
         </div>
       </footer>
 
-      <AnimatePresence>
+      {createPortal(<AnimatePresence>
         {menu && (
           <>
             <div className="ctx-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null) }} />
@@ -387,7 +403,7 @@ function ChatPanel({ conv, onBack }: { conv: Conversation; onBack: () => void })
             </motion.div>
           </>
         )}
-      </AnimatePresence>
+      </AnimatePresence>, document.body)}
       {conv.type === 2 && <GroupMembersModal open={membersOpen} conversation={conv} onClose={() => setMembersOpen(false)} />}
     </div>
   )
@@ -415,7 +431,7 @@ function MessageRow({
 }): JSX.Element {
   const [hover, setHover] = useState(false)
 
-  if (msg.recalled) {
+  if (msg.recalled || msg.type === 6) {
     return (
       <div className="msg-row recalled">
         <span className="msg-notice">

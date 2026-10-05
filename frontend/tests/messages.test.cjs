@@ -1,6 +1,6 @@
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { confirmMessage, failMessage, mergeMessages, prepareRetry, receivedCursor, toLocalMsg } = require('../out/tests/core/message-state.js')
+const { confirmMessage, failMessage, mergeMessages, messagesForDisplay, prepareRetry, receivedCursor, toLocalMsg } = require('../out/tests/core/message-state.js')
 
 const msg = (seq, overrides = {}) => ({
   id: String(90071992547409910n + BigInt(seq)), conversationId: '1', groupId: '1',
@@ -72,4 +72,34 @@ test('迟到的 HTTP 错误不会覆盖 WS 成功回执', () => {
   const confirmed = confirmMessage([optimistic], 'ack-race', { id: '12', seq: 2, createTime: 12346 })
   assert.deepEqual(failMessage(confirmed, 'ack-race'), confirmed)
   assert.deepEqual(prepareRetry(confirmed, 'ack-race'), confirmed)
+})
+
+test('撤回事件具有新水位，可更新旧消息且重复补齐不显示两次', () => {
+  const original = msg(1)
+  const notice = msg(121, { type: 6, content: '撤回了一条消息', recallMessageId: original.id })
+  const merged = mergeMessages([toLocalMsg(original)], [notice])
+  assert.equal(merged[0].recalled, true)
+  assert.equal(merged[0].content, '')
+  assert.equal(receivedCursor(120, [notice]), 121)
+  assert.equal(messagesForDisplay(merged).length, 1)
+  assert.deepEqual(mergeMessages(merged, [notice, original]), merged)
+})
+
+test('原消息不在最近页时展示撤回通知，翻到原消息后不会复活或重复提示', () => {
+  const original = msg(1, { status: 2, content: '' })
+  const notice = msg(121, { type: 6, content: '撤回了一条消息', recallMessageId: original.id })
+  const latest = mergeMessages([], [notice])
+  assert.equal(messagesForDisplay(latest).length, 1)
+  const history = mergeMessages(latest, [original])
+  const displayed = messagesForDisplay(history)
+  assert.equal(displayed.length, 1)
+  assert.equal(displayed[0].recalled, true)
+  assert.equal(displayed[0].content, '')
+})
+
+test('刷新后以服务端状态隐藏撤回正文，普通消息不能伪造撤回目标', () => {
+  assert.equal(toLocalMsg(msg(1, { status: 2, content: '不应渲染的旧正文' })).content, '')
+  const original = msg(1)
+  const forged = msg(2, { type: 1, recallMessageId: original.id })
+  assert.equal(mergeMessages([toLocalMsg(original)], [forged])[0].recalled, false)
 })

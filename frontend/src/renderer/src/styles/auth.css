@@ -11,6 +11,18 @@
   overflow: hidden;
 }
 
+.auth-error {
+  margin: 0;
+  padding: 10px 12px;
+  color: #a72d48;
+  background: #fff0f3;
+  border: 1px solid #f5ced8;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* 标题栏之下的舞台：居中放卡片；空白区域可拖拽移动窗口（卡片内豁免） */
 .auth-stage {
   position: relative;

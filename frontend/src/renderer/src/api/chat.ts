@@ -101,6 +101,16 @@ export function apiQuitGroup(conversationId: string): Promise<{ success: boolean
   return post('chat', '/api/group/quit', { conversationId })
 }
 
+export function apiInviteGroup(conversationId: string, userIds: string[]): Promise<{ cnt: number }> {
+  return post('chat', '/api/group/add_group_chat', { conversationId, userIds })
+}
+
+export function apiUpdateGroup(conversationId: string, patch: {
+  name?: string; avatarUrl?: string; aliasName?: string
+}): Promise<{ success: boolean }> {
+  return post('chat', '/api/group/update', { conversationId, ...patch })
+}
+
 // ── 工具 ──
 
 /** 兼容旧接口的空载映射（保留给未来按 uuid 查询等场景） */

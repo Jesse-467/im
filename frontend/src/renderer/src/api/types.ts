@@ -38,10 +38,12 @@ export interface ChatMsg {
   groupId: string
   seq: number
   senderId: EntityId
-  type: number // 1 文本
+  type: number // 1 文本；6 服务端撤回事件（不可通过发送接口伪造）
   content: string
   uuid: string
   createTime: number
+  status?: number // 1 正常，2 已撤回；旧服务可不返回
+  recallMessageId?: EntityId // type=6 时要更新的原消息 ID
 }
 
 /** 会话列表项（对齐 conversationItemDTO） */
@@ -56,6 +58,7 @@ export interface Conversation {
   lastReadSeq: number
   maxSeq: number
   lastMsg: ChatMsg | null
+  lastSenderName?: string
 }
 
 export interface Friend {

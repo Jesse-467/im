@@ -189,7 +189,7 @@ export function ContactsView({ onNav }: { onNav: (key: NavKey) => void }): JSX.E
       </section>
 
       <AddFriendModal open={addOpen} onClose={() => setAddOpen(false)} />
-      <CreateGroupModal open={groupOpen} onClose={() => setGroupOpen(false)} />
+      <CreateGroupModal open={groupOpen} onClose={() => setGroupOpen(false)} onCreated={() => onNav('chat')} />
     </motion.div>
   )
 }
@@ -355,7 +355,7 @@ function AddFriendModal({ open, onClose }: { open: boolean; onClose: () => void 
 }
 
 /** 创建群聊弹窗：从好友中多选初始成员 */
-function CreateGroupModal({ open, onClose }: { open: boolean; onClose: () => void }): JSX.Element {
+function CreateGroupModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }): JSX.Element {
   const friends = useChatStore((s) => s.friends)
   const createGroup = useChatStore((s) => s.createGroup)
   const [groupName, setGroupName] = useState('')
@@ -381,6 +381,7 @@ function CreateGroupModal({ open, onClose }: { open: boolean; onClose: () => voi
       onClose()
       setGroupName('')
       setPicked([])
+      onCreated()
     } catch (err) {
       toast(err instanceof ApiError ? err.message : '创建失败', 'error')
     } finally {
@@ -395,7 +396,7 @@ function CreateGroupModal({ open, onClose }: { open: boolean; onClose: () => voi
         <input
           placeholder="给群聊起个名字"
           value={groupName}
-          maxLength={30}
+          maxLength={50}
           onChange={(e) => setGroupName(e.target.value)}
           autoFocus
         />
